@@ -1,7 +1,7 @@
 [project]
 name = "deepagents"
-version = "0.2.4"
-description = "General purpose 'deep agent' with sub-agent spawning, todo list capabilities, and mock file system. Built on LangGraph."
+version = "0.3.0"
+description = "Enhanced general purpose 'deep agent' with sub-agent spawning, todo list capabilities, and mock file system. Built on LangGraph with Deephaven and Redis integration."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11,<4.0"
@@ -9,7 +9,9 @@ dependencies = [
     "langchain-anthropic>=1.0.0,<2.0.0",
     "langchain>=1.0.2,<2.0.0",
     "langchain-core>=1.0.0,<2.0.0",
-    "wcmatch"
+    "wcmatch",
+    "pydeephaven>=0.38.0,<0.40.0",
+    "redis>=5.0.0,<6.0.0",
 ]
 
 
@@ -22,13 +24,19 @@ Slack = "https://www.langchain.com/join-community"
 Reddit = "https://www.reddit.com/r/LangChain/"
 
 
-[dependency-groups]
+[project.optional-dependencies]
 test = [
   "pytest",
   "pytest-cov",
   "ruff>=0.12.2,<0.13.0",
   "mypy>=1.18.1,<1.19.0",
 ]
+deephaven_mcp = [
+    "deephaven-mcp @ ./deephaven-mcp",
+    "langchain-mcp-adapters>=0.1.0",
+]
+
+[dependency-groups]
 
 dev = [
   "langchain-openai",
@@ -42,11 +50,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 [tool.setuptools.packages.find]
-where = ["libs"]
+where = ["src"]
 include = ["deepagents*"]
 
 [tool.setuptools.package-dir]
-"" = "libs"
+"" = "src"
 
 [tool.setuptools.package-data]
 "*" = ["py.typed", "*.md"]

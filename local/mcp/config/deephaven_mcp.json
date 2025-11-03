@@ -1,0 +1,10 @@
+{
+  "community": {
+    "sessions": {
+      "local": {
+        "host": "deephaven",
+        "port": 10000
+      }
+    }
+  }
+}

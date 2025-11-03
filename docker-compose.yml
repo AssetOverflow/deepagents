@@ -1,0 +1,85 @@
+# Local development stack for DeepAgents + Deephaven + Deephaven MCP + Redis
+# This brings up:
+#  - deephaven: Deephaven Community Core server
+#  - redis: Redis for cache/store integration
+#  - mcp-systems: Deephaven MCP Systems Server (talks to Deephaven)
+#
+# Usage:
+#   1. python scripts/setup_local_stack.py  (creates local dirs + config)
+#   2. docker compose up --build
+#   3. (optional) docker compose logs -f mcp-systems
+#
+# Deephaven Web UI: http://localhost:10000/ide/ (once started)
+# Redis: localhost:6379
+# MCP Systems Server: stdio tool invoked inside container (not exposed)
+
+services:
+  deephaven:
+    image: ghcr.io/deephaven/server:latest
+    container_name: deephaven
+    restart: unless-stopped
+    environment:
+      # Pre-shared key auth handler (PSK). The MCP config will reference this token.
+      - DEEPHAVEN_AUTH_KEY=${DEEPHAVEN_PSK:-dev-psk}
+      # Allow PSK auth
+      - JAVA_TOOL_OPTIONS=-Dauthentication.psk.file=/run/secrets/psk
+    secrets:
+      - psk
+    ports:
+      - "10000:10000"
+    volumes:
+      - ./local/deephaven/data:/data
+      - ./local/deephaven/cache:/cache
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -sf http://localhost:10000/proto/application_health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./local/redis/data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  mcp-systems:
+    build:
+      context: .
+      dockerfile: ./deephaven-mcp/Dockerfile
+    container_name: deephaven-mcp-systems
+    restart: unless-stopped
+    depends_on:
+      deephaven:
+        condition: service_healthy
+    environment:
+      - DH_MCP_CONFIG_FILE=/config/deephaven_mcp.json
+      - PYTHONLOGLEVEL=INFO
+    volumes:
+      - ./local/mcp/config:/config:ro
+      - ./deephaven-mcp:/workspace/deephaven-mcp:ro
+    working_dir: /workspace/deephaven-mcp
+    command: ["dh-mcp-systems-server"]
+    # No public ports exposed; MCP runs over stdio inside container for tool execution
+    healthcheck:
+      test: ["CMD", "bash", "-c", "[ -f /tmp/mcp.systems.ready ] || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+
+secrets:
+  psk:
+    file: ./local/secrets/psk.txt
+
+networks:
+  default:
+    name: deepagents_net
+

@@ -1,12 +1,14 @@
 """UI rendering and display utilities for the CLI."""
 
 import json
+import re
+import shutil
 from pathlib import Path
 from typing import Any
 
 from rich import box
+from rich.markup import escape
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.text import Text
 
 from .config import COLORS, COMMANDS, DEEP_AGENTS_ASCII, MAX_ARG_LENGTH, console
@@ -124,6 +126,13 @@ def format_tool_display(tool_name: str, tool_args: dict) -> str:
         if parts:
             return f"{tool_name}({' '.join(parts)})"
 
+    elif tool_name == "fetch_url":
+        # Fetch URL: show the URL being fetched
+        if "url" in tool_args:
+            url = str(tool_args["url"])
+            url = truncate_value(url, 80)
+            return f'{tool_name}("{url}")'
+
     elif tool_name == "task":
         # Task: show the task description
         if "description" in tool_args:
@@ -164,12 +173,12 @@ def format_tool_message_content(content: Any) -> str:
 class TokenTracker:
     """Track token usage across the conversation."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.baseline_context = 0  # Baseline system context (system + agent.md + tools)
         self.current_context = 0  # Total context including messages
         self.last_output = 0
 
-    def set_baseline(self, tokens: int):
+    def set_baseline(self, tokens: int) -> None:
         """Set the baseline context token count.
 
         Args:
@@ -178,25 +187,25 @@ class TokenTracker:
         self.baseline_context = tokens
         self.current_context = tokens
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset to baseline (for /clear command)."""
         self.current_context = self.baseline_context
         self.last_output = 0
 
-    def add(self, input_tokens: int, output_tokens: int):
+    def add(self, input_tokens: int, output_tokens: int) -> None:
         """Add tokens from a response."""
         # input_tokens IS the current context size (what was sent to the model)
         self.current_context = input_tokens
         self.last_output = output_tokens
 
-    def display_last(self):
+    def display_last(self) -> None:
         """Display current context size after this turn."""
         if self.last_output and self.last_output >= 1000:
             console.print(f"  Generated: {self.last_output:,} tokens", style="dim")
         if self.current_context:
             console.print(f"  Current context: {self.current_context:,} tokens", style="dim")
 
-    def display_session(self):
+    def display_session(self) -> None:
         """Display current context size."""
         console.print("\n[bold]Token Usage:[/bold]", style=COLORS["primary"])
 
@@ -257,29 +266,6 @@ def render_todo_list(todos: list[dict]) -> None:
     console.print(panel)
 
 
-def render_summary_panel(summary_content: str) -> None:
-    """Render conversation summary as a collapsible panel."""
-    # Extract just the summary text, removing any metadata
-    summary_text = summary_content.strip()
-
-    # Truncate if very long
-    if len(summary_text) > 500:
-        preview = summary_text[:500] + "..."
-    else:
-        preview = summary_text
-
-    panel = Panel(
-        f"[dim]Context exceeded threshold. Conversation history summarized to preserve context.[/dim]\n\n"
-        f"[yellow]Summary:[/yellow]\n{preview}\n\n"
-        f"[dim]Recent messages kept in full. Continuing with reduced context...[/dim]",
-        title="[bold yellow]⚠ Context Summarized[/bold yellow]",
-        border_style="yellow",
-        box=box.ROUNDED,
-        padding=(1, 2),
-    )
-    console.print(panel)
-
-
 def _format_line_span(start: int | None, end: int | None) -> str:
     if start is None and end is None:
         return ""
@@ -323,23 +309,24 @@ def render_file_operation(record: FileOperationRecord) -> None:
             detail = f"{detail} {span}"
         _print_detail(detail)
     else:
-        bytes_written = record.metrics.bytes_written
         if record.tool_name == "write_file":
+            added = record.metrics.lines_added
+            removed = record.metrics.lines_removed
             lines = record.metrics.lines_written
             detail = f"Wrote {lines} line{'s' if lines != 1 else ''}"
-            if record.metrics.lines_added:
-                detail = f"{detail} (+{record.metrics.lines_added})"
+            if added or removed:
+                detail = f"{detail} (+{added} / -{removed})"
         else:
             added = record.metrics.lines_added
             removed = record.metrics.lines_removed
             detail = f"Edited {record.metrics.lines_written} total line{'s' if record.metrics.lines_written != 1 else ''}"
             if added or removed:
                 detail = f"{detail} (+{added} / -{removed})"
-        if bytes_written:
-            detail = f"{detail} · {bytes_written} bytes"
         _print_detail(detail)
 
-    if record.diff:
+    # Skip diff display for HIL-approved operations that succeeded
+    # (user already saw the diff during approval)
+    if record.diff and not (record.hitl_approved and record.status == "success"):
         render_diff(record)
 
 
@@ -350,16 +337,158 @@ def render_diff(record: FileOperationRecord) -> None:
     render_diff_block(record.diff, f"Diff {record.display_path}")
 
 
-def render_diff_block(diff: str, title: str) -> None:
-    """Render a diff string inside a Rich panel."""
-    syntax = Syntax(diff, "diff", theme="monokai", line_numbers=False)
-    panel = Panel(
-        syntax, title=title, border_style=COLORS["primary"], box=box.ROUNDED, padding=(0, 1)
+def _wrap_diff_line(
+    code: str,
+    marker: str,
+    color: str,
+    line_num: int | None,
+    width: int,
+    term_width: int,
+) -> list[str]:
+    """Wrap long diff lines with proper indentation.
+
+    Args:
+        code: Code content to wrap
+        marker: Diff marker ('+', '-', ' ')
+        color: Color for the line
+        line_num: Line number to display (None for continuation lines)
+        width: Width for line number column
+        term_width: Terminal width
+
+    Returns:
+        List of formatted lines (may be multiple if wrapped)
+    """
+    # Escape Rich markup in code content
+    code = escape(code)
+
+    prefix_len = width + 4  # line_num + space + marker + 2 spaces
+    available_width = term_width - prefix_len
+
+    if len(code) <= available_width:
+        if line_num is not None:
+            return [f"[dim]{line_num:>{width}}[/dim] [{color}]{marker}  {code}[/{color}]"]
+        return [f"{' ' * width} [{color}]{marker}  {code}[/{color}]"]
+
+    lines = []
+    remaining = code
+    first = True
+
+    while remaining:
+        if len(remaining) <= available_width:
+            chunk = remaining
+            remaining = ""
+        else:
+            # Try to break at a good point (space, comma, etc.)
+            chunk = remaining[:available_width]
+            # Look for a good break point in the last 20 chars
+            break_point = max(
+                chunk.rfind(" "),
+                chunk.rfind(","),
+                chunk.rfind("("),
+                chunk.rfind(")"),
+            )
+            if break_point > available_width - 20:
+                # Found a good break point
+                chunk = remaining[: break_point + 1]
+                remaining = remaining[break_point + 1 :]
+            else:
+                # No good break point, just split
+                chunk = remaining[:available_width]
+                remaining = remaining[available_width:]
+
+        if first and line_num is not None:
+            lines.append(f"[dim]{line_num:>{width}}[/dim] [{color}]{marker}  {chunk}[/{color}]")
+            first = False
+        else:
+            lines.append(f"{' ' * width} [{color}]{marker}  {chunk}[/{color}]")
+
+    return lines
+
+
+def format_diff_rich(diff_lines: list[str]) -> str:
+    """Format diff lines with line numbers and colors.
+
+    Args:
+        diff_lines: Diff lines from unified diff
+
+    Returns:
+        Rich-formatted diff string with line numbers
+    """
+    if not diff_lines:
+        return "[dim]No changes detected[/dim]"
+
+    # Get terminal width
+    term_width = shutil.get_terminal_size().columns
+
+    # Find max line number for width calculation
+    max_line = max(
+        (
+            int(m.group(i))
+            for line in diff_lines
+            if (m := re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)", line))
+            for i in (1, 2)
+        ),
+        default=0,
     )
-    console.print(panel)
+    width = max(3, len(str(max_line)))
+
+    formatted_lines = []
+    old_num = new_num = 0
+
+    # Rich colors with backgrounds for better visibility
+    # White text on dark backgrounds for additions/deletions
+    addition_color = "white on dark_green"
+    deletion_color = "white on dark_red"
+    context_color = "dim"
+
+    for line in diff_lines:
+        if line.strip() == "...":
+            formatted_lines.append(f"[{context_color}]...[/{context_color}]")
+        elif line.startswith(("---", "+++")):
+            continue
+        elif m := re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)", line):
+            old_num, new_num = int(m.group(1)), int(m.group(2))
+        elif line.startswith("-"):
+            formatted_lines.extend(
+                _wrap_diff_line(line[1:], "-", deletion_color, old_num, width, term_width)
+            )
+            old_num += 1
+        elif line.startswith("+"):
+            formatted_lines.extend(
+                _wrap_diff_line(line[1:], "+", addition_color, new_num, width, term_width)
+            )
+            new_num += 1
+        elif line.startswith(" "):
+            formatted_lines.extend(
+                _wrap_diff_line(line[1:], " ", context_color, old_num, width, term_width)
+            )
+            old_num += 1
+            new_num += 1
+
+    return "\n".join(formatted_lines)
 
 
-def show_interactive_help():
+def render_diff_block(diff: str, title: str) -> None:
+    """Render a diff string with line numbers and colors."""
+    try:
+        # Parse diff into lines and format with line numbers
+        diff_lines = diff.splitlines()
+        formatted_diff = format_diff_rich(diff_lines)
+
+        # Print with a simple header
+        console.print()
+        console.print(f"[bold {COLORS['primary']}]═══ {title} ═══[/bold {COLORS['primary']}]")
+        console.print(formatted_diff)
+        console.print()
+    except (ValueError, AttributeError, IndexError, OSError):
+        # Fallback to simple rendering if formatting fails
+        console.print()
+        console.print(f"[bold {COLORS['primary']}]{title}[/bold {COLORS['primary']}]")
+        console.print(diff)
+        console.print()
+
+
+def show_interactive_help() -> None:
     """Show available commands during interactive session."""
     console.print()
     console.print("[bold]Interactive Commands:[/bold]", style=COLORS["primary"])
@@ -407,20 +536,29 @@ def show_interactive_help():
     console.print()
 
 
-def show_help():
+def show_help() -> None:
     """Show help information."""
     console.print()
     console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
     console.print()
 
     console.print("[bold]Usage:[/bold]", style=COLORS["primary"])
-    console.print("  deepagents [--agent NAME] [--auto-approve]     Start interactive session")
+    console.print("  deepagents [OPTIONS]                           Start interactive session")
     console.print("  deepagents list                                List all available agents")
     console.print("  deepagents reset --agent AGENT                 Reset agent to default prompt")
     console.print(
         "  deepagents reset --agent AGENT --target SOURCE Reset agent to copy of another agent"
     )
     console.print("  deepagents help                                Show this help message")
+    console.print()
+
+    console.print("[bold]Options:[/bold]", style=COLORS["primary"])
+    console.print("  --agent NAME                  Agent identifier (default: agent)")
+    console.print("  --auto-approve                Auto-approve tool usage without prompting")
+    console.print(
+        "  --sandbox TYPE                Remote sandbox for execution (modal, runloop, daytona)"
+    )
+    console.print("  --sandbox-id ID               Reuse existing sandbox (skips creation/cleanup)")
     console.print()
 
     console.print("[bold]Examples:[/bold]", style=COLORS["primary"])
@@ -433,6 +571,18 @@ def show_help():
     )
     console.print(
         "  deepagents --auto-approve               # Start with auto-approve enabled",
+        style=COLORS["dim"],
+    )
+    console.print(
+        "  deepagents --sandbox runloop            # Execute code in Runloop sandbox",
+        style=COLORS["dim"],
+    )
+    console.print(
+        "  deepagents --sandbox modal              # Execute code in Modal sandbox",
+        style=COLORS["dim"],
+    )
+    console.print(
+        "  deepagents --sandbox runloop --sandbox-id dbx_123  # Reuse existing sandbox",
         style=COLORS["dim"],
     )
     console.print(

@@ -1,3 +1,0 @@
-[submodule "deephaven-mcp"]
-	   path = deephaven-mcp
-	      url = https://github.com/deephaven/deephaven-mcp.git

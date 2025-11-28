@@ -35,7 +35,7 @@ DEFAULT_CONTEXT_MESSAGES_TO_KEEP = 6
 def _create_core_middleware(
     model: str | BaseChatModel,
     trigger: tuple[str, float | int],
-    keep: tuple[str, int],
+    keep: tuple[str, float | int],
 ) -> list[AgentMiddleware]:
     """Factory function for reusable, core middleware components.
 
@@ -147,7 +147,7 @@ def create_deep_agent(
         and isinstance(model.profile["max_input_tokens"], int)
     ):
         trigger: tuple[str, float | int] = ("fraction", 0.85)
-        keep: tuple[str, int] = ("fraction", 0.10)  # type: ignore[assignment]
+        keep: tuple[str, float | int] = ("fraction", 0.10)
     else:
         # Use proactive summarization threshold for early context management
         trigger = ("tokens", PROACTIVE_SUMMARY_THRESHOLD)

@@ -31,6 +31,16 @@ from deepagents.backends.protocol import (
 if TYPE_CHECKING:
     from deepagents.backends import sandbox_io_pb2_grpc
 
+
+def _empty_to_none(value: str) -> str | None:
+    """Convert empty string to None.
+
+    gRPC/protobuf returns empty strings for unset fields,
+    but our protocol expects None for absent values.
+    """
+    return value if value else None
+
+
 _GLOB_COMMAND_TEMPLATE = """python3 -c "
 import glob
 import os
@@ -634,7 +644,7 @@ class GrpcSandbox(SandboxBackendProtocol):
             return [
                 FileUploadResponse(
                     path=result.path,
-                    error=result.error if result.error else None,  # type: ignore[arg-type]
+                    error=_empty_to_none(result.error),  # type: ignore[arg-type]
                 )
                 for result in response.results
             ]
@@ -658,7 +668,7 @@ class GrpcSandbox(SandboxBackendProtocol):
                 FileDownloadResponse(
                     path=result.path,
                     content=result.content if not result.error else None,
-                    error=result.error if result.error else None,  # type: ignore[arg-type]
+                    error=_empty_to_none(result.error),  # type: ignore[arg-type]
                 )
                 for result in response.results
             ]

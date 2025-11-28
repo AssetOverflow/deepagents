@@ -38,6 +38,9 @@ jobs:
           # CLI package
           - working-directory: "libs/deepagents-cli"
             python-version: "3.11"
+          # benchmarking
+          - working-directory: "libs/harbor"
+            python-version: "3.13"
       fail-fast: false
     uses: ./.github/workflows/_lint.yml
     with:
@@ -61,6 +64,9 @@ jobs:
             python-version: "3.11"
           - working-directory: "libs/deepagents-cli"
             python-version: "3.13"
+          # benchmarking
+          - working-directory: "libs/harbor"
+            python-version: "3.13"
       fail-fast: false
     uses: ./.github/workflows/_test.yml
     with:
@@ -71,7 +77,7 @@ jobs:
   ci_success:
     name: "✅ CI Success"
     needs: [lint, test]
-    if: always()
+    if: ${{ always() && !cancelled() }}    # Add !cancelled() to skip if the workflow was cancelled
     runs-on: ubuntu-latest
     env:
       RESULTS_JSON: ${{ toJSON(needs.*.result) }}

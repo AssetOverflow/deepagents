@@ -2,6 +2,7 @@
 # ruff: noqa: E501
 
 import os
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -103,11 +104,15 @@ def _file_data_reducer(left: dict[str, FileData] | None, right: dict[str, FileDa
 
 
 def _validate_path(path: str, *, allowed_prefixes: Sequence[str] | None = None) -> str:
-    """Validate and normalize file path for security.
+    r"""Validate and normalize file path for security.
 
     Ensures paths are safe to use by preventing directory traversal attacks
     and enforcing consistent formatting. All paths are normalized to use
     forward slashes and start with a leading slash.
+
+    This function is designed for virtual filesystem paths and rejects
+    Windows absolute paths (e.g., C:/..., F:/...) to maintain consistency
+    and prevent path format ambiguity.
 
     Args:
         path: The path to validate and normalize.
@@ -118,14 +123,16 @@ def _validate_path(path: str, *, allowed_prefixes: Sequence[str] | None = None) 
         Normalized canonical path starting with `/` and using forward slashes.
 
     Raises:
-        ValueError: If path contains traversal sequences (`..` or `~`) or does
-            not start with an allowed prefix when `allowed_prefixes` is specified.
+        ValueError: If path contains traversal sequences (`..` or `~`), is a
+            Windows absolute path (e.g., C:/...), or does not start with an
+            allowed prefix when `allowed_prefixes` is specified.
 
     Example:
         ```python
         validate_path("foo/bar")  # Returns: "/foo/bar"
         validate_path("/./foo//bar")  # Returns: "/foo/bar"
         validate_path("../etc/passwd")  # Raises ValueError
+        validate_path(r"C:\\Users\\file.txt")  # Raises ValueError
         validate_path("/data/file.txt", allowed_prefixes=["/data/"])  # OK
         validate_path("/etc/file.txt", allowed_prefixes=["/data/"])  # Raises ValueError
         ```
@@ -135,7 +142,12 @@ def _validate_path(path: str, *, allowed_prefixes: Sequence[str] | None = None) 
         msg = f"Path traversal not allowed: {path}"
         raise ValueError(msg)
 
-    # Normalize path (resolve ., //, etc.)
+    # Reject Windows absolute paths (e.g., C:\..., D:/...)
+    # This maintains consistency in virtual filesystem paths
+    if re.match(r"^[a-zA-Z]:", path):
+        msg = f"Windows absolute paths are not supported: {path}. Please use virtual paths starting with / (e.g., /workspace/file.txt)"
+        raise ValueError(msg)
+
     normalized = os.path.normpath(path)
 
     # Convert to forward slashes for consistency
@@ -637,51 +649,14 @@ def _ls_tool_generator(custom_description: str | None = None, *, long_term_memor
     elif long_term_memory:
         tool_description += LIST_FILES_TOOL_DESCRIPTION_LONGTERM_SUPPLEMENT
 
-    def _get_filenames_from_state(state: FilesystemState) -> list[str]:
-        """Extract list of filenames from the filesystem state.
-
-        Args:
-            state: The current filesystem state.
-
-        Returns:
-            List of file paths in the state.
-        """
-        files_dict = state.get("files", {})
-        return list(files_dict.keys())
-
-    def _filter_files_by_path(filenames: list[str], path: str | None) -> list[str]:
-        """Filter filenames by path prefix.
-
-        Args:
-            filenames: List of file paths to filter.
-            path: Optional path prefix to filter by.
-
-        Returns:
-            Filtered list of file paths matching the prefix.
-        """
-        if path is None:
-            return filenames
-        normalized_path = _validate_path(path)
-        return [f for f in filenames if f.startswith(normalized_path)]
-
-    if long_term_memory:
-
-        @tool(description=tool_description)
-        def ls(runtime: ToolRuntime[None, FilesystemState], path: str | None = None) -> list[str]:
-            files = _get_filenames_from_state(runtime.state)
-            # Add filenames from longterm memory
-            store = _get_store(runtime)
-            namespace = _get_namespace()
-            longterm_files = store.search(namespace)
-            longterm_files_prefixed = [_append_memories_prefix(f.key) for f in longterm_files]
-            files.extend(longterm_files_prefixed)
-            return _filter_files_by_path(files, path)
-    else:
-
-        @tool(description=tool_description)
-        def ls(runtime: ToolRuntime[None, FilesystemState], path: str | None = None) -> list[str]:
-            files = _get_filenames_from_state(runtime.state)
-            return _filter_files_by_path(files, path)
+    @tool(description=tool_description)
+    def ls(runtime: ToolRuntime[None, FilesystemState], path: str) -> str:
+        resolved_backend = _get_backend(backend, runtime)
+        validated_path = _validate_path(path)
+        infos = resolved_backend.ls_info(validated_path)
+        paths = [fi.get("path", "") for fi in infos]
+        result = truncate_if_too_long(paths)
+        return str(result)
 
     return ls
 
@@ -980,146 +955,11 @@ def _edit_file_tool_generator(custom_description: str | None = None, *, long_ter
     return edit_file
 
 
-<<<<<<< HEAD:libs/deepagents/middleware/filesystem.py
-=======
-def _glob_tool_generator(
-    backend: BackendProtocol | Callable[[ToolRuntime], BackendProtocol],
-    custom_description: str | None = None,
-) -> BaseTool:
-    """Generate the glob tool.
-
-    Args:
-        backend: Backend to use for file storage, or a factory function that takes runtime and returns a backend.
-        custom_description: Optional custom description for the tool.
-
-    Returns:
-        Configured glob tool that finds files by pattern using the backend.
-    """
-    tool_description = custom_description or GLOB_TOOL_DESCRIPTION
-
-    @tool(description=tool_description)
-    def glob(pattern: str, runtime: ToolRuntime[None, FilesystemState], path: str = "/") -> list[str]:
-        resolved_backend = _get_backend(backend, runtime)
-        infos = resolved_backend.glob_info(pattern, path=path)
-        return [fi.get("path", "") for fi in infos]
-
-    return glob
-
-
-def _grep_tool_generator(
-    backend: BackendProtocol | Callable[[ToolRuntime], BackendProtocol],
-    custom_description: str | None = None,
-) -> BaseTool:
-    """Generate the grep tool.
-
-    Args:
-        backend: Backend to use for file storage, or a factory function that takes runtime and returns a backend.
-        custom_description: Optional custom description for the tool.
-
-    Returns:
-        Configured grep tool that searches for patterns in files using the backend.
-    """
-    tool_description = custom_description or GREP_TOOL_DESCRIPTION
-
-    @tool(description=tool_description)
-    def grep(
-        pattern: str,
-        runtime: ToolRuntime[None, FilesystemState],
-        path: str | None = None,
-        glob: str | None = None,
-        output_mode: Literal["files_with_matches", "content", "count"] = "files_with_matches",
-    ) -> str:
-        resolved_backend = _get_backend(backend, runtime)
-        raw = resolved_backend.grep_raw(pattern, path=path, glob=glob)
-        if isinstance(raw, str):
-            return raw
-        formatted = format_grep_matches(raw, output_mode)
-        return truncate_if_too_long(formatted)  # type: ignore[arg-type]
-
-    return grep
-
-
-def _supports_execution(backend: BackendProtocol) -> bool:
-    """Check if a backend supports command execution.
-
-    For CompositeBackend, checks if the default backend supports execution.
-    For other backends, checks if they implement SandboxBackendProtocol.
-
-    Args:
-        backend: The backend to check.
-
-    Returns:
-        True if the backend supports execution, False otherwise.
-    """
-    # Import here to avoid circular dependency
-    from deepagents.backends.composite import CompositeBackend
-
-    # For CompositeBackend, check the default backend
-    if isinstance(backend, CompositeBackend):
-        return isinstance(backend.default, SandboxBackendProtocol)
-
-    # For other backends, use isinstance check
-    return isinstance(backend, SandboxBackendProtocol)
-
-
-def _execute_tool_generator(
-    backend: BackendProtocol | Callable[[ToolRuntime], BackendProtocol],
-    custom_description: str | None = None,
-) -> BaseTool:
-    """Generate the execute tool for sandbox command execution.
-
-    Args:
-        backend: Backend to use for execution, or a factory function that takes runtime and returns a backend.
-        custom_description: Optional custom description for the tool.
-
-    Returns:
-        Configured execute tool that runs commands if backend supports SandboxBackendProtocol.
-    """
-    tool_description = custom_description or EXECUTE_TOOL_DESCRIPTION
-
-    @tool(description=tool_description)
-    def execute(
-        command: str,
-        runtime: ToolRuntime[None, FilesystemState],
-    ) -> str:
-        resolved_backend = _get_backend(backend, runtime)
-
-        # Runtime check - fail gracefully if not supported
-        if not _supports_execution(resolved_backend):
-            return (
-                "Error: Execution not available. This agent's backend "
-                "does not support command execution (SandboxBackendProtocol). "
-                "To use the execute tool, provide a backend that implements SandboxBackendProtocol."
-            )
-
-        try:
-            result = resolved_backend.execute(command)
-        except NotImplementedError as e:
-            # Handle case where execute() exists but raises NotImplementedError
-            return f"Error: Execution not available. {e}"
-
-        # Format output for LLM consumption
-        parts = [result.output]
-
-        if result.exit_code is not None:
-            status = "succeeded" if result.exit_code == 0 else "failed"
-            parts.append(f"\n[Command {status} with exit code {result.exit_code}]")
-
-        if result.truncated:
-            parts.append("\n[Output was truncated due to size limits]")
-
-        return "".join(parts)
-
-    return execute
-
-
->>>>>>> upstream/master:libs/deepagents/deepagents/middleware/filesystem.py
 TOOL_GENERATORS = {
     "ls": _ls_tool_generator,
     "read_file": _read_file_tool_generator,
     "write_file": _write_file_tool_generator,
     "edit_file": _edit_file_tool_generator,
-<<<<<<< HEAD:libs/deepagents/middleware/filesystem.py
 }
 
 
@@ -1127,31 +967,11 @@ def _get_filesystem_tools(custom_tool_descriptions: dict[str, str] | None = None
     """Get filesystem tools.
 
     Args:
-=======
-    "glob": _glob_tool_generator,
-    "grep": _grep_tool_generator,
-    "execute": _execute_tool_generator,
-}
-
-
-def _get_filesystem_tools(
-    backend: BackendProtocol,
-    custom_tool_descriptions: dict[str, str] | None = None,
-) -> list[BaseTool]:
-    """Get filesystem and execution tools.
-
-    Args:
-        backend: Backend to use for file storage and optional execution, or a factory function that takes runtime and returns a backend.
->>>>>>> upstream/master:libs/deepagents/deepagents/middleware/filesystem.py
         custom_tool_descriptions: Optional custom descriptions for tools.
         long_term_memory: Whether to enable longterm memory support.
 
     Returns:
-<<<<<<< HEAD:libs/deepagents/middleware/filesystem.py
         List of configured filesystem tools (ls, read_file, write_file, edit_file).
-=======
-        List of configured tools: ls, read_file, write_file, edit_file, glob, grep, execute.
->>>>>>> upstream/master:libs/deepagents/deepagents/middleware/filesystem.py
     """
     if custom_tool_descriptions is None:
         custom_tool_descriptions = {}
@@ -1176,31 +996,17 @@ Here are the first 10 lines of the result:
 class FilesystemMiddleware(AgentMiddleware):
     """Middleware for providing filesystem and optional execution tools to an agent.
 
-<<<<<<< HEAD:libs/deepagents/middleware/filesystem.py
     This middleware adds four filesystem tools to the agent: ls, read_file, write_file,
     and edit_file. Files can be stored in two locations:
     - Short-term: In the agent's state (ephemeral, lasts only for the conversation)
     - Long-term: In a persistent store (persists across conversations when enabled)
-=======
-    This middleware adds filesystem tools to the agent: ls, read_file, write_file,
-    edit_file, glob, and grep. Files can be stored using any backend that implements
-    the BackendProtocol.
->>>>>>> upstream/master:libs/deepagents/deepagents/middleware/filesystem.py
 
     If the backend implements SandboxBackendProtocol, an execute tool is also added
     for running shell commands.
 
     Args:
-<<<<<<< HEAD:libs/deepagents/middleware/filesystem.py
         long_term_memory: Whether to enable longterm memory support.
         system_prompt_extension: Optional custom system prompt override.
-=======
-        backend: Backend for file storage and optional execution. If not provided, defaults to StateBackend
-            (ephemeral storage in agent state). For persistent storage or hybrid setups,
-            use CompositeBackend with custom routes. For execution support, use a backend
-            that implements SandboxBackendProtocol.
-        system_prompt: Optional custom system prompt override.
->>>>>>> upstream/master:libs/deepagents/deepagents/middleware/filesystem.py
         custom_tool_descriptions: Optional custom tool descriptions override.
 
     Raises:
@@ -1208,7 +1014,6 @@ class FilesystemMiddleware(AgentMiddleware):
 
     Example:
         ```python
-<<<<<<< HEAD:libs/deepagents/middleware/filesystem.py
         from langchain.agents.middleware.filesystem import FilesystemMiddleware
         from langchain.agents import create_agent
 
@@ -1217,24 +1022,6 @@ class FilesystemMiddleware(AgentMiddleware):
 
         # With long-term memory
         agent = create_agent(middleware=[FilesystemMiddleware(long_term_memory=True)])
-=======
-        from deepagents.middleware.filesystem import FilesystemMiddleware
-        from deepagents.backends import StateBackend, StoreBackend, CompositeBackend
-        from langchain.agents import create_agent
-
-        # Ephemeral storage only (default, no execution)
-        agent = create_agent(middleware=[FilesystemMiddleware()])
-
-        # With hybrid storage (ephemeral + persistent /memories/)
-        backend = CompositeBackend(default=StateBackend(), routes={"/memories/": StoreBackend()})
-        agent = create_agent(middleware=[FilesystemMiddleware(backend=backend)])
-
-        # With sandbox backend (supports execution)
-        from my_sandbox import DockerSandboxBackend
-
-        sandbox = DockerSandboxBackend(container_id="my-container")
-        agent = create_agent(middleware=[FilesystemMiddleware(backend=sandbox)])
->>>>>>> upstream/master:libs/deepagents/deepagents/middleware/filesystem.py
         ```
     """
 
@@ -1251,12 +1038,7 @@ class FilesystemMiddleware(AgentMiddleware):
         """Initialize the filesystem middleware.
 
         Args:
-<<<<<<< HEAD:libs/deepagents/middleware/filesystem.py
             long_term_memory: Whether to enable longterm memory support.
-=======
-            backend: Backend for file storage and optional execution, or a factory callable.
-                Defaults to StateBackend if not provided.
->>>>>>> upstream/master:libs/deepagents/deepagents/middleware/filesystem.py
             system_prompt: Optional custom system prompt override.
             custom_tool_descriptions: Optional custom tool descriptions override.
             tool_token_limit_before_evict: Optional token limit before evicting a tool result to the filesystem.
@@ -1271,18 +1053,8 @@ class FilesystemMiddleware(AgentMiddleware):
 
         self.tools = _get_filesystem_tools(custom_tool_descriptions, long_term_memory=long_term_memory)
 
-<<<<<<< HEAD:libs/deepagents/middleware/filesystem.py
     def before_agent(self, state: AgentState, runtime: Runtime[Any]) -> dict[str, Any] | None:  # noqa: ARG002
         """Validate that store is available if longterm memory is enabled.
-=======
-        # Set system prompt (allow full override or None to generate dynamically)
-        self._custom_system_prompt = system_prompt
-
-        self.tools = _get_filesystem_tools(self.backend, custom_tool_descriptions)
-
-    def _get_backend(self, runtime: ToolRuntime) -> BackendProtocol:
-        """Get the resolved backend instance from backend or factory.
->>>>>>> upstream/master:libs/deepagents/deepagents/middleware/filesystem.py
 
         Args:
             state: The state of the agent.
@@ -1393,36 +1165,7 @@ class FilesystemMiddleware(AgentMiddleware):
 
         return await handler(request)
 
-<<<<<<< HEAD:libs/deepagents/middleware/filesystem.py
     def _intercept_large_tool_result(self, tool_result: ToolMessage | Command) -> ToolMessage | Command:
-=======
-    def _process_large_message(
-        self,
-        message: ToolMessage,
-        resolved_backend: BackendProtocol,
-    ) -> tuple[ToolMessage, dict[str, FileData] | None]:
-        content = message.content
-        if not isinstance(content, str) or len(content) <= 4 * self.tool_token_limit_before_evict:
-            return message, None
-
-        sanitized_id = sanitize_tool_call_id(message.tool_call_id)
-        file_path = f"/large_tool_results/{sanitized_id}"
-        result = resolved_backend.write(file_path, content)
-        if result.error:
-            return message, None
-        content_sample = format_content_with_line_numbers([line[:1000] for line in content.splitlines()[:10]], start_line=1)
-        processed_message = ToolMessage(
-            TOO_LARGE_TOOL_MSG.format(
-                tool_call_id=message.tool_call_id,
-                file_path=file_path,
-                content_sample=content_sample,
-            ),
-            tool_call_id=message.tool_call_id,
-        )
-        return processed_message, result.files_update
-
-    def _intercept_large_tool_result(self, tool_result: ToolMessage | Command, runtime: ToolRuntime) -> ToolMessage | Command:
->>>>>>> upstream/master:libs/deepagents/deepagents/middleware/filesystem.py
         if isinstance(tool_result, ToolMessage) and isinstance(tool_result.content, str):
             content = tool_result.content
             if self.tool_token_limit_before_evict and len(content) > 4 * self.tool_token_limit_before_evict:

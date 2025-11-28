@@ -118,30 +118,17 @@ def create_deep_agent(
     if model is None:
         model = get_default_model()
 
-    redis_client = None
-    redis_prefix = "deepagents"
-    if redis_settings is not None:
-        if isinstance(redis_settings, str):
-            redis_settings = RedisSettings(url=redis_settings)
-        elif not isinstance(redis_settings, RedisSettings):
-            msg = "redis_settings must be a RedisSettings instance or connection URL"
-            raise TypeError(msg)
-        redis_client = create_redis_client(redis_settings)
-        redis_prefix = redis_settings.prefix.rstrip(":") or "deepagents"
-
-    if redis_client is not None and cache is None and enable_redis_cache:
-        cache = RedisCache(
-            redis_client,
-            prefix=f"{redis_prefix}:cache",
-            default_ttl_seconds=redis_cache_default_ttl_seconds,
-        )
-
-    store_to_use = store
-    desired_store = enable_redis_store
-    if desired_store is None:
-        desired_store = use_longterm_memory
-    if redis_client is not None and store_to_use is None and desired_store:
-        store_to_use = RedisStore(redis_client, prefix=f"{redis_prefix}:store")
+    if (
+        model.profile is not None
+        and isinstance(model.profile, dict)
+        and "max_input_tokens" in model.profile
+        and isinstance(model.profile["max_input_tokens"], int)
+    ):
+        trigger = ("fraction", 0.85)
+        keep = ("fraction", 0.10)
+    else:
+        trigger = ("tokens", 170000)
+        keep = ("messages", 6)
 
     deepagent_middleware = [
         TodoListMiddleware(),
@@ -159,8 +146,9 @@ def create_deep_agent(
                 ),
                 SummarizationMiddleware(
                     model=model,
-                    max_tokens_before_summary=170000,
-                    messages_to_keep=6,
+                    trigger=trigger,
+                    keep=keep,
+                    trim_tokens_to_summarize=None,
                 ),
                 AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
                 PatchToolCallsMiddleware(),
@@ -170,8 +158,9 @@ def create_deep_agent(
         ),
         SummarizationMiddleware(
             model=model,
-            max_tokens_before_summary=170000,
-            messages_to_keep=6,
+            trigger=trigger,
+            keep=keep,
+            trim_tokens_to_summarize=None,
         ),
         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
         PatchToolCallsMiddleware(),

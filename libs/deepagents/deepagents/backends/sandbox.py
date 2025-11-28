@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 from abc import ABC, abstractmethod
 
 from deepagents.backends.protocol import (
     EditResult,
     ExecuteResponse,
+    FileDownloadResponse,
     FileInfo,
+    FileUploadResponse,
     GrepMatch,
     SandboxBackendProtocol,
     WriteResult,
@@ -270,10 +273,10 @@ except PermissionError:
         glob: str | None = None,
     ) -> list[GrepMatch] | str:
         """Structured search results or error string for invalid input."""
-        search_path = path or "."
+        search_path = shlex.quote(path or ".")
 
         # Build grep command to get structured output
-        grep_opts = "-rHn"  # recursive, with filename, with line number
+        grep_opts = "-rHnF"  # recursive, with filename, with line number, fixed-strings (literal)
 
         # Add glob pattern if specified
         glob_pattern = ""
@@ -281,9 +284,9 @@ except PermissionError:
             glob_pattern = f"--include='{glob}'"
 
         # Escape pattern for shell
-        pattern_escaped = pattern.replace("'", "'\\\\''")
+        pattern_escaped = shlex.quote(pattern)
 
-        cmd = f"grep {grep_opts} {glob_pattern} -e '{pattern_escaped}' '{search_path}' 2>/dev/null || true"
+        cmd = f"grep {grep_opts} {glob_pattern} -e {pattern_escaped} {search_path} 2>/dev/null || true"
         result = self.execute(cmd)
 
         output = result.output.rstrip()
@@ -338,4 +341,20 @@ except PermissionError:
     @property
     @abstractmethod
     def id(self) -> str:
-        """Unique identifier for this backend instance."""
+        """Unique identifier for the sandbox backend."""
+
+    @abstractmethod
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        """Upload multiple files to the sandbox.
+
+        Implementations must support partial success - catch exceptions per-file
+        and return errors in FileUploadResponse objects rather than raising.
+        """
+
+    @abstractmethod
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Download multiple files from the sandbox.
+
+        Implementations must support partial success - catch exceptions per-file
+        and return errors in FileDownloadResponse objects rather than raising.
+        """

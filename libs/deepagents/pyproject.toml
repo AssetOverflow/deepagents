@@ -10,6 +10,8 @@ dependencies = [
     "langchain>=1.1.0,<2.0.0",
     "langchain-core>=1.1.0,<2.0.0",
     "wcmatch",
+    "grpcio>=1.50.0",
+    "grpcio-tools>=1.50.0",
 ]
 
 
@@ -42,12 +44,15 @@ requires = ["setuptools>=73.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.package-data]
-"*" = ["py.typed", "*.md"]
+"*" = ["py.typed", "*.md", "*.proto"]
 
 [tool.ruff]
 line-length = 150
 # Exclude any files that shouldn't be linted
-exclude = []
+exclude = [
+    "*_pb2.py",
+    "*_pb2_grpc.py",
+]
 
 [tool.ruff.format]
 docstring-code-format = true  # Formats code blocks in docstrings
@@ -93,3 +98,7 @@ enable_error_code = ["deprecated"]
 # Optional: reduce strictness if needed
 disallow_any_generics = false
 warn_return_any = false
+exclude = [
+    ".*_pb2\\.py$",
+    ".*_pb2_grpc\\.py$",
+]

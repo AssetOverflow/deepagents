@@ -24,6 +24,45 @@ from deepagents.redis import RedisCache, RedisSettings, RedisStore, create_redis
 
 BASE_AGENT_PROMPT = "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
+# Proactive summarization threshold for cost/performance efficiency.
+# This triggers summarization earlier than the model's context limit to keep prompts lean.
+PROACTIVE_SUMMARY_THRESHOLD = 45000
+
+# Default number of recent messages to keep after summarization.
+DEFAULT_CONTEXT_MESSAGES_TO_KEEP = 6
+
+
+def _create_core_middleware(
+    model: str | BaseChatModel,
+    trigger: tuple[str, float | int],
+    keep: tuple[str, float | int],
+) -> list[AgentMiddleware]:
+    """Factory function for reusable, core middleware components.
+
+    These are middleware that should be consistently applied across both
+    the main agent and subagents for uniform context management.
+
+    Args:
+        model: The language model to use for summarization.
+        trigger: Tuple of (mode, threshold) for when to trigger summarization.
+            Mode is either "fraction" or "tokens".
+        keep: Tuple of (mode, count) for how many messages to keep.
+            Mode is either "fraction" or "messages".
+
+    Returns:
+        List of core middleware instances for summarization, caching, and tool patching.
+    """
+    return [
+        SummarizationMiddleware(
+            model=model,
+            trigger=trigger,  # type: ignore[arg-type]
+            keep=keep,  # type: ignore[arg-type]
+            trim_tokens_to_summarize=None,
+        ),
+        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+        PatchToolCallsMiddleware(),
+    ]
+
 
 def get_default_model() -> ChatAnthropic:
     """Get the default model for deep agents.
@@ -35,6 +74,41 @@ def get_default_model() -> ChatAnthropic:
         model_name="claude-sonnet-4-5-20250929",
         max_tokens=20000,
     )
+
+
+def _create_core_middleware(
+    model: str | BaseChatModel,
+    backend: BackendProtocol | BackendFactory | None = None,
+) -> list[AgentMiddleware]:
+    """Create the core, reusable middleware stack for agents.
+
+    This factory function creates a consistent middleware configuration that can be
+    shared between the main agent and subagents. It includes:
+    - TodoListMiddleware for task planning and progress tracking
+    - FilesystemMiddleware for file operations
+    - SummarizationMiddleware with proactive summarization threshold
+    - AnthropicPromptCachingMiddleware for caching system prompts
+    - PatchToolCallsMiddleware for fixing dangling tool calls
+
+    Args:
+        model: The language model to use for summarization.
+        backend: Optional backend for file storage and execution.
+
+    Returns:
+        A list of configured AgentMiddleware instances.
+    """
+    return [
+        TodoListMiddleware(),
+        FilesystemMiddleware(backend=backend),
+        SummarizationMiddleware(
+            model=model,
+            trigger=("tokens", PROACTIVE_SUMMARY_THRESHOLD),
+            keep=("messages", DEFAULT_CONTEXT_MESSAGES_TO_KEEP),
+            trim_tokens_to_summarize=None,
+        ),
+        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+        PatchToolCallsMiddleware(),
+    ]
 
 
 def create_deep_agent(
@@ -118,52 +192,45 @@ def create_deep_agent(
     if model is None:
         model = get_default_model()
 
+    # Determine summarization trigger and keep settings
+    # Use proactive threshold for token-based triggering
     if (
-        model.profile is not None
+        hasattr(model, "profile")
+        and model.profile is not None
         and isinstance(model.profile, dict)
         and "max_input_tokens" in model.profile
         and isinstance(model.profile["max_input_tokens"], int)
     ):
-        trigger = ("fraction", 0.85)
-        keep = ("fraction", 0.10)
+        trigger: tuple[str, float | int] = ("fraction", 0.85)
+        keep: tuple[str, float | int] = ("fraction", 0.10)
     else:
-        trigger = ("tokens", 170000)
-        keep = ("messages", 6)
+        # Use proactive summarization threshold for early context management
+        trigger = ("tokens", PROACTIVE_SUMMARY_THRESHOLD)
+        keep = ("messages", DEFAULT_CONTEXT_MESSAGES_TO_KEEP)
 
-    deepagent_middleware = [
+    # Create the core, reusable middleware stack for summarization/caching/patching
+    core_middleware_stack = _create_core_middleware(model, trigger, keep)
+
+    # Build the default middleware stack for subagents
+    # Subagents get TodoList + Filesystem + core stack for consistent context management
+    subagent_middleware_stack: list[AgentMiddleware] = [
         TodoListMiddleware(),
-        FilesystemMiddleware(
-            long_term_memory=use_longterm_memory,
-        ),
+        FilesystemMiddleware(backend=backend),
+        *core_middleware_stack,
+    ]
+
+    deepagent_middleware: list[AgentMiddleware] = [
+        TodoListMiddleware(),
+        FilesystemMiddleware(backend=backend),
         SubAgentMiddleware(
             default_model=model,
             default_tools=tools,
             subagents=subagents if subagents is not None else [],
-            default_middleware=[
-                TodoListMiddleware(),
-                FilesystemMiddleware(
-                    long_term_memory=use_longterm_memory,
-                ),
-                SummarizationMiddleware(
-                    model=model,
-                    trigger=trigger,
-                    keep=keep,
-                    trim_tokens_to_summarize=None,
-                ),
-                AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
-                PatchToolCallsMiddleware(),
-            ],
+            default_middleware=subagent_middleware_stack,
             default_interrupt_on=interrupt_on,
             general_purpose_agent=True,
         ),
-        SummarizationMiddleware(
-            model=model,
-            trigger=trigger,
-            keep=keep,
-            trim_tokens_to_summarize=None,
-        ),
-        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
-        PatchToolCallsMiddleware(),
+        *core_middleware_stack,  # Include Summarization, Caching, Patching for main agent
     ]
     if interrupt_on is not None:
         deepagent_middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))

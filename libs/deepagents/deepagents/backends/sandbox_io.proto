@@ -1,0 +1,174 @@
+// Protobuf definition for high-performance Sandbox I/O via gRPC.
+// This defines the RPC interface for fast, strongly-typed file operations,
+// replacing slow shell-wrapped Python scripts.
+
+syntax = "proto3";
+
+package deepagents.sandbox;
+
+// --- Data Structures ---
+
+// Structured grep match entry, corresponding to GrepMatch in protocol.py
+message GrepMatch {
+    string path = 1;
+    int32 line = 2;
+    string text = 3;
+}
+
+// Structured file info, corresponding to FileInfo in protocol.py
+message FileInfo {
+    string path = 1;
+    bool is_dir = 2;
+    int64 size = 3;
+    string modified_at = 4; // ISO timestamp
+}
+
+// --- Requests & Responses ---
+
+// Request to read file content with optional pagination
+message ReadRequest {
+    string file_path = 1;
+    int32 offset = 2;
+    int32 limit = 3;
+}
+
+// Response containing formatted file content or error message
+message ReadResponse {
+    string output = 1;
+}
+
+// Request to write content to a file
+message WriteRequest {
+    string file_path = 1;
+    string content = 2;
+    bool overwrite = 3; // Allow optional atomic overwrite
+}
+
+// Result of write operation
+message WriteResult {
+    string error = 1; // Populated on failure
+    string path = 2;  // Path of written file on success
+}
+
+// Request to edit file by string replacement
+message EditRequest {
+    string file_path = 1;
+    string old_string = 2;
+    string new_string = 3;
+    bool replace_all = 4;
+}
+
+// Result of edit operation
+message EditResult {
+    string error = 1;     // Populated on failure
+    string path = 2;      // Path of edited file on success
+    int32 occurrences = 3; // Number of replacements made
+}
+
+// Request to list directory contents
+message ListRequest {
+    string path = 1;
+}
+
+// Request for grep operation
+message GrepRequest {
+    string pattern = 1;
+    string path = 2;     // Optional directory path to search
+    string glob = 3;     // Optional glob pattern to filter files
+}
+
+// Request for glob operation
+message GlobRequest {
+    string pattern = 1;
+    string path = 2;     // Base directory to search from
+}
+
+// Request to execute a shell command
+message ExecuteRequest {
+    string command = 1;
+}
+
+// Response from command execution
+message ExecuteResponse {
+    string output = 1;
+    int32 exit_code = 2;
+    bool truncated = 3;
+}
+
+// Request to upload files
+message UploadRequest {
+    repeated FileUpload files = 1;
+}
+
+message FileUpload {
+    string path = 1;
+    bytes content = 2;
+}
+
+message FileUploadResult {
+    string path = 1;
+    string error = 2; // Populated on failure
+}
+
+message UploadResponse {
+    repeated FileUploadResult results = 1;
+}
+
+// Request to download files
+message DownloadRequest {
+    repeated string paths = 1;
+}
+
+message FileDownloadResult {
+    string path = 1;
+    bytes content = 2;
+    string error = 3; // Populated on failure
+}
+
+message DownloadResponse {
+    repeated FileDownloadResult results = 1;
+}
+
+// Empty message for sandbox ID request
+message Empty {}
+
+// Response containing sandbox ID
+message IdResponse {
+    string id = 1;
+}
+
+// --- Service Definition ---
+
+// gRPC service for Sandbox I/O operations
+// Provides fast, low-latency file operations bypassing shell commands
+service SandboxIORouter {
+    // Read file content with optional offset and limit
+    rpc ReadFile(ReadRequest) returns (ReadResponse);
+
+    // Write content to a new file (error if exists unless overwrite=true)
+    rpc WriteFile(WriteRequest) returns (WriteResult);
+
+    // Edit file by replacing string occurrences
+    rpc EditFile(EditRequest) returns (EditResult);
+
+    // List directory contents, streaming for large directories
+    rpc ListInfo(ListRequest) returns (stream FileInfo);
+
+    // Search for pattern in files, streaming results
+    rpc GrepRaw(GrepRequest) returns (stream GrepMatch);
+
+    // Find files matching glob pattern, streaming results
+    rpc GlobInfo(GlobRequest) returns (stream FileInfo);
+
+    // Execute a shell command
+    rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+
+    // Upload multiple files
+    rpc UploadFiles(UploadRequest) returns (UploadResponse);
+
+    // Download multiple files
+    rpc DownloadFiles(DownloadRequest) returns (DownloadResponse);
+
+    // Get the sandbox ID
+    rpc GetId(Empty) returns (IdResponse);
+}

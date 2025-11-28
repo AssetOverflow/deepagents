@@ -3,6 +3,8 @@
 This module provides a base class that implements all SandboxBackendProtocol
 methods using shell commands executed via execute(). Concrete implementations
 only need to implement the execute() method.
+
+It also provides GrpcSandbox for high-performance file I/O via gRPC.
 """
 
 from __future__ import annotations
@@ -11,6 +13,9 @@ import base64
 import json
 import shlex
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
+import grpc
 
 from deepagents.backends.protocol import (
     EditResult,
@@ -22,6 +27,19 @@ from deepagents.backends.protocol import (
     SandboxBackendProtocol,
     WriteResult,
 )
+
+if TYPE_CHECKING:
+    from deepagents.backends import sandbox_io_pb2_grpc
+
+
+def _empty_to_none(value: str) -> str | None:
+    """Convert empty string to None.
+
+    gRPC/protobuf returns empty strings for unset fields,
+    but our protocol expects None for absent values.
+    """
+    return value if value else None
+
 
 _GLOB_COMMAND_TEMPLATE = """python3 -c "
 import glob
@@ -358,3 +376,311 @@ except PermissionError:
         Implementations must support partial success - catch exceptions per-file
         and return errors in FileDownloadResponse objects rather than raising.
         """
+
+
+class GrpcSandbox(SandboxBackendProtocol):
+    """High-performance sandbox backend using gRPC for file operations.
+
+    This class implements all SandboxBackendProtocol methods using fast gRPC
+    calls instead of slow shell-wrapped Python scripts. It communicates with
+    a Sandbox I/O Server that runs locally or remotely alongside the execution
+    environment.
+
+    The gRPC approach replaces a multi-step process (shell startup, Python
+    interpreter startup, Base64 encoding/decoding, file I/O) with a single,
+    fast RPC network call, drastically reducing latency for common file
+    operations.
+
+    Args:
+        rpc_endpoint: The gRPC endpoint to connect to (e.g., "localhost:50051").
+        sandbox_id: Optional explicit sandbox ID. If not provided, it will be
+            fetched from the server.
+
+    Example:
+        >>> sandbox = GrpcSandbox("localhost:50051")
+        >>> content = sandbox.read("/path/to/file.txt")
+        >>> result = sandbox.write("/path/to/new.txt", "content")
+    """
+
+    def __init__(self, rpc_endpoint: str, sandbox_id: str | None = None) -> None:
+        """Initialize the gRPC client and connect to the Sandbox I/O Server.
+
+        Args:
+            rpc_endpoint: The gRPC endpoint to connect to (e.g., "localhost:50051").
+            sandbox_id: Optional explicit sandbox ID. If not provided, it will be
+                fetched from the server.
+        """
+        # Import here to avoid circular imports and for lazy loading
+        from deepagents.backends import sandbox_io_pb2, sandbox_io_pb2_grpc
+
+        self._rpc_endpoint = rpc_endpoint
+        self._channel: grpc.Channel = grpc.insecure_channel(rpc_endpoint)
+        self._stub: sandbox_io_pb2_grpc.SandboxIORouterStub = sandbox_io_pb2_grpc.SandboxIORouterStub(self._channel)
+        self._sandbox_id = sandbox_id
+        self._pb2 = sandbox_io_pb2
+
+    def _handle_rpc_error(self, e: grpc.RpcError, operation: str) -> str:
+        """Format RPC errors consistently.
+
+        Args:
+            e: The gRPC RpcError to handle.
+            operation: The operation that failed.
+
+        Returns:
+            Formatted error string.
+        """
+        return f"Error: RPC communication failed during {operation}: {e.details()}"
+
+    @property
+    def id(self) -> str:
+        """Unique identifier for the sandbox backend.
+
+        Returns:
+            The sandbox ID, either from the constructor or fetched from server.
+        """
+        if self._sandbox_id is None:
+            try:
+                response = self._stub.GetId(self._pb2.Empty())
+                self._sandbox_id = response.id
+            except grpc.RpcError:
+                # Return a fallback ID if server is unreachable
+                return f"grpc-sandbox-{self._rpc_endpoint}"
+        return self._sandbox_id
+
+    def read(
+        self,
+        file_path: str,
+        offset: int = 0,
+        limit: int = 2000,
+    ) -> str:
+        """Read file content via fast RPC call.
+
+        Args:
+            file_path: Absolute path to the file to read.
+            offset: Line number to start reading from (0-indexed).
+            limit: Maximum number of lines to read.
+
+        Returns:
+            String containing file content formatted with line numbers,
+            or an error string if the file doesn't exist or can't be read.
+        """
+        request = self._pb2.ReadRequest(file_path=file_path, offset=offset, limit=limit)
+        try:
+            response = self._stub.ReadFile(request)
+            return response.output
+        except grpc.RpcError as e:
+            return self._handle_rpc_error(e, "read")
+
+    def write(
+        self,
+        file_path: str,
+        content: str,
+    ) -> WriteResult:
+        """Create a new file via RPC.
+
+        The Sandbox I/O Server implements the file existence check atomically.
+
+        Args:
+            file_path: Absolute path where the file should be created.
+            content: String content to write to the file.
+
+        Returns:
+            WriteResult with path on success or error on failure.
+        """
+        request = self._pb2.WriteRequest(file_path=file_path, content=content)
+        try:
+            response = self._stub.WriteFile(request)
+            if response.error:
+                # files_update=None is correct for external storage
+                return WriteResult(error=response.error, files_update=None)
+            return WriteResult(path=response.path, files_update=None)
+        except grpc.RpcError as e:
+            return WriteResult(error=self._handle_rpc_error(e, "write"), files_update=None)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        """Edit a file by replacing string occurrences via RPC.
+
+        Args:
+            file_path: Absolute path to the file to edit.
+            old_string: Exact string to search for and replace.
+            new_string: String to replace old_string with.
+            replace_all: If True, replace all occurrences.
+
+        Returns:
+            EditResult with path and occurrences on success, or error on failure.
+        """
+        request = self._pb2.EditRequest(
+            file_path=file_path,
+            old_string=old_string,
+            new_string=new_string,
+            replace_all=replace_all,
+        )
+        try:
+            response = self._stub.EditFile(request)
+            if response.error:
+                return EditResult(error=response.error, files_update=None)
+            return EditResult(
+                path=response.path,
+                files_update=None,
+                occurrences=response.occurrences,
+            )
+        except grpc.RpcError as e:
+            return EditResult(error=self._handle_rpc_error(e, "edit"), files_update=None)
+
+    def ls_info(self, path: str) -> list[FileInfo]:
+        """List directory contents with metadata via streaming RPC.
+
+        Args:
+            path: Absolute path to the directory to list.
+
+        Returns:
+            List of FileInfo dicts containing file metadata.
+        """
+        request = self._pb2.ListRequest(path=path)
+        try:
+            file_infos: list[FileInfo] = []
+            for item in self._stub.ListInfo(request):
+                info: FileInfo = {
+                    "path": item.path,
+                    "is_dir": item.is_dir,
+                }
+                if item.size:
+                    info["size"] = item.size
+                if item.modified_at:
+                    info["modified_at"] = item.modified_at
+                file_infos.append(info)
+            return file_infos
+        except grpc.RpcError:
+            return []
+
+    def grep_raw(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+    ) -> list[GrepMatch] | str:
+        """Search for pattern in files via streaming RPC.
+
+        Args:
+            pattern: Literal string to search for (NOT regex).
+            path: Optional directory path to search in.
+            glob: Optional glob pattern to filter files.
+
+        Returns:
+            List of GrepMatch dicts on success, or error string on failure.
+        """
+        request = self._pb2.GrepRequest(pattern=pattern, path=path or "", glob=glob or "")
+        try:
+            matches: list[GrepMatch] = []
+            for match in self._stub.GrepRaw(request):
+                matches.append({"path": match.path, "line": match.line, "text": match.text})
+            return matches
+        except grpc.RpcError as e:
+            return self._handle_rpc_error(e, "grep")
+
+    def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+        """Find files matching glob pattern via streaming RPC.
+
+        Args:
+            pattern: Glob pattern with wildcards to match file paths.
+            path: Base directory to search from.
+
+        Returns:
+            List of FileInfo dicts for matching files.
+        """
+        request = self._pb2.GlobRequest(pattern=pattern, path=path)
+        try:
+            file_infos: list[FileInfo] = []
+            for item in self._stub.GlobInfo(request):
+                info: FileInfo = {"path": item.path, "is_dir": item.is_dir}
+                if item.size:
+                    info["size"] = item.size
+                if item.modified_at:
+                    info["modified_at"] = item.modified_at
+                file_infos.append(info)
+            return file_infos
+        except grpc.RpcError:
+            return []
+
+    def execute(self, command: str) -> ExecuteResponse:
+        """Execute a command in the sandbox via RPC.
+
+        Args:
+            command: Full shell command string to execute.
+
+        Returns:
+            ExecuteResponse with combined output, exit code, and truncation flag.
+        """
+        request = self._pb2.ExecuteRequest(command=command)
+        try:
+            response = self._stub.Execute(request)
+            return ExecuteResponse(
+                output=response.output,
+                exit_code=response.exit_code,
+                truncated=response.truncated,
+            )
+        except grpc.RpcError as e:
+            return ExecuteResponse(output=self._handle_rpc_error(e, "execute"), exit_code=1)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        """Upload multiple files to the sandbox via RPC.
+
+        Args:
+            files: List of (path, content) tuples to upload.
+
+        Returns:
+            List of FileUploadResponse objects, one per input file.
+        """
+        file_uploads = [self._pb2.FileUpload(path=path, content=content) for path, content in files]
+        request = self._pb2.UploadRequest(files=file_uploads)
+        try:
+            response = self._stub.UploadFiles(request)
+            return [
+                FileUploadResponse(
+                    path=result.path,
+                    error=_empty_to_none(result.error),  # type: ignore[arg-type]
+                )
+                for result in response.results
+            ]
+        except grpc.RpcError:
+            # Return error for all files
+            return [FileUploadResponse(path=path, error="permission_denied") for path, _ in files]
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Download multiple files from the sandbox via RPC.
+
+        Args:
+            paths: List of file paths to download.
+
+        Returns:
+            List of FileDownloadResponse objects, one per input path.
+        """
+        request = self._pb2.DownloadRequest(paths=paths)
+        try:
+            response = self._stub.DownloadFiles(request)
+            return [
+                FileDownloadResponse(
+                    path=result.path,
+                    content=result.content if not result.error else None,
+                    error=_empty_to_none(result.error),  # type: ignore[arg-type]
+                )
+                for result in response.results
+            ]
+        except grpc.RpcError:
+            # Return error for all files
+            return [FileDownloadResponse(path=path, content=None, error="file_not_found") for path in paths]
+
+    def close(self) -> None:
+        """Close the gRPC channel.
+
+        Should be called when the sandbox is no longer needed to clean up
+        resources.
+        """
+        if self._channel:
+            self._channel.close()

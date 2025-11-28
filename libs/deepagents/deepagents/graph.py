@@ -24,11 +24,44 @@ from deepagents.redis import RedisCache, RedisSettings, RedisStore, create_redis
 
 BASE_AGENT_PROMPT = "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
-# Context management configuration for cost/performance efficiency
-# Trigger summarization at 45k tokens (well before the model limit) to keep prompts lean
+# Proactive summarization threshold for cost/performance efficiency.
+# This triggers summarization earlier than the model's context limit to keep prompts lean.
 PROACTIVE_SUMMARY_THRESHOLD = 45000
-# Number of messages to keep when summarizing context
+
+# Default number of recent messages to keep after summarization.
 DEFAULT_CONTEXT_MESSAGES_TO_KEEP = 6
+
+
+def _create_core_middleware(
+    model: str | BaseChatModel,
+    trigger: tuple[str, float | int],
+    keep: tuple[str, float | int],
+) -> list[AgentMiddleware]:
+    """Factory function for reusable, core middleware components.
+
+    These are middleware that should be consistently applied across both
+    the main agent and subagents for uniform context management.
+
+    Args:
+        model: The language model to use for summarization.
+        trigger: Tuple of (mode, threshold) for when to trigger summarization.
+            Mode is either "fraction" or "tokens".
+        keep: Tuple of (mode, count) for how many messages to keep.
+            Mode is either "fraction" or "messages".
+
+    Returns:
+        List of core middleware instances for summarization, caching, and tool patching.
+    """
+    return [
+        SummarizationMiddleware(
+            model=model,
+            trigger=trigger,  # type: ignore[arg-type]
+            keep=keep,  # type: ignore[arg-type]
+            trim_tokens_to_summarize=None,
+        ),
+        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+        PatchToolCallsMiddleware(),
+    ]
 
 
 def get_default_model() -> ChatAnthropic:
@@ -159,28 +192,45 @@ def create_deep_agent(
     if model is None:
         model = get_default_model()
 
-    # Create the core, reusable middleware stack for subagents
-    core_middleware_stack = _create_core_middleware(model, backend)
+    # Determine summarization trigger and keep settings
+    # Use proactive threshold for token-based triggering
+    if (
+        hasattr(model, "profile")
+        and model.profile is not None
+        and isinstance(model.profile, dict)
+        and "max_input_tokens" in model.profile
+        and isinstance(model.profile["max_input_tokens"], int)
+    ):
+        trigger: tuple[str, float | int] = ("fraction", 0.85)
+        keep: tuple[str, float | int] = ("fraction", 0.10)
+    else:
+        # Use proactive summarization threshold for early context management
+        trigger = ("tokens", PROACTIVE_SUMMARY_THRESHOLD)
+        keep = ("messages", DEFAULT_CONTEXT_MESSAGES_TO_KEEP)
 
-    # Configure the subagent middleware to use the core stack as its default
-    subagent_middleware = SubAgentMiddleware(
-        default_model=model,
-        default_tools=tools,
-        subagents=subagents if subagents is not None else [],
-        default_middleware=core_middleware_stack,
-        default_interrupt_on=interrupt_on,
-        general_purpose_agent=True,
-    )
+    # Create the core, reusable middleware stack for summarization/caching/patching
+    core_middleware_stack = _create_core_middleware(model, trigger, keep)
 
-    # Build the main agent middleware stack
-    # Uses TodoListMiddleware and FilesystemMiddleware directly, then SubAgentMiddleware,
-    # followed by the remaining core middleware components (Summarization, Caching, Patching)
+    # Build the default middleware stack for subagents
+    # Subagents get TodoList + Filesystem + core stack for consistent context management
+    subagent_middleware_stack: list[AgentMiddleware] = [
+        TodoListMiddleware(),
+        FilesystemMiddleware(backend=backend),
+        *core_middleware_stack,
+    ]
+
     deepagent_middleware: list[AgentMiddleware] = [
         TodoListMiddleware(),
         FilesystemMiddleware(backend=backend),
-        subagent_middleware,
-        # Include Summarization, Caching, Patching for main agent (indices 2-4 of core stack)
-        *core_middleware_stack[2:],
+        SubAgentMiddleware(
+            default_model=model,
+            default_tools=tools,
+            subagents=subagents if subagents is not None else [],
+            default_middleware=subagent_middleware_stack,
+            default_interrupt_on=interrupt_on,
+            general_purpose_agent=True,
+        ),
+        *core_middleware_stack,  # Include Summarization, Caching, Patching for main agent
     ]
     if interrupt_on is not None:
         deepagent_middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))

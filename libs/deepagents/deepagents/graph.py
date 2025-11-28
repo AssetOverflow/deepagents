@@ -17,10 +17,10 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
 
-from deepagents.backends.protocol import BackendFactory, BackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent, SubAgentMiddleware
+from deepagents.redis import RedisCache, RedisSettings, RedisStore, create_redis_client
 
 BASE_AGENT_PROMPT = "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
@@ -48,11 +48,15 @@ def create_deep_agent(
     context_schema: type[Any] | None = None,
     checkpointer: Checkpointer | None = None,
     store: BaseStore | None = None,
-    backend: BackendProtocol | BackendFactory | None = None,
+    use_longterm_memory: bool = False,
     interrupt_on: dict[str, bool | InterruptOnConfig] | None = None,
     debug: bool = False,
     name: str | None = None,
     cache: BaseCache | None = None,
+    redis_settings: RedisSettings | str | None = None,
+    enable_redis_cache: bool = False,
+    enable_redis_store: bool | None = None,
+    redis_cache_default_ttl_seconds: int | None = None,
 ) -> CompiledStateGraph:
     """Create a deep agent.
 
@@ -63,12 +67,16 @@ def create_deep_agent(
     The execute tool allows running shell commands if the backend implements SandboxBackendProtocol.
     For non-sandbox backends, the execute tool will return an error message.
 
+    Redis integration is optional and configured via ``redis_settings``.  When
+    provided, callers can opt into Redis-backed caching and/or the Redis-backed
+    long-term store without manually instantiating the adapters.
+
     Args:
-        model: The model to use. Defaults to Claude Sonnet 4.
         tools: The tools the agent should have access to.
         system_prompt: The additional instructions the agent should have. Will go in
             the system prompt.
         middleware: Additional middleware to apply after standard middleware.
+        model: The model to use.
         subagents: The subagents to use. Each subagent should be a dictionary with the
             following keys:
                 - `name`
@@ -83,6 +91,8 @@ def create_deep_agent(
         context_schema: The schema of the deep agent.
         checkpointer: Optional checkpointer for persisting agent state between runs.
         store: Optional store for persistent storage (required if backend uses StoreBackend).
+        use_longterm_memory: Whether to use longterm memory - you must provide a store
+            in order to use longterm memory.
         backend: Optional backend for file storage and execution. Pass either a Backend instance
             or a callable factory like `lambda rt: StateBackend(rt)`. For execution support,
             use a backend that implements SandboxBackendProtocol.
@@ -91,6 +101,16 @@ def create_deep_agent(
         debug: Whether to enable debug mode. Passed through to create_agent.
         name: The name of the agent. Passed through to create_agent.
         cache: The cache to use for the agent. Passed through to create_agent.
+        redis_settings: Connection settings or URL for Redis-backed capabilities.
+            When a string is supplied it is interpreted as a Redis connection URL;
+            otherwise provide an instance of :class:`~deepagents.redis.RedisSettings`.
+        enable_redis_cache: Whether to automatically configure a Redis cache when
+            ``redis_settings`` are provided and ``cache`` is not supplied.
+        enable_redis_store: Whether to create a Redis-backed store when
+            ``redis_settings`` are provided and ``store`` is not supplied. Defaults
+            to ``use_longterm_memory`` when ``None``.
+        redis_cache_default_ttl_seconds: Default TTL in seconds for Redis cache
+            entries when a TTL is not specified by the caller.
 
     Returns:
         A configured deep agent.
@@ -112,14 +132,18 @@ def create_deep_agent(
 
     deepagent_middleware = [
         TodoListMiddleware(),
-        FilesystemMiddleware(backend=backend),
+        FilesystemMiddleware(
+            long_term_memory=use_longterm_memory,
+        ),
         SubAgentMiddleware(
             default_model=model,
             default_tools=tools,
             subagents=subagents if subagents is not None else [],
             default_middleware=[
                 TodoListMiddleware(),
-                FilesystemMiddleware(backend=backend),
+                FilesystemMiddleware(
+                    long_term_memory=use_longterm_memory,
+                ),
                 SummarizationMiddleware(
                     model=model,
                     trigger=trigger,
@@ -141,10 +165,10 @@ def create_deep_agent(
         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
         PatchToolCallsMiddleware(),
     ]
-    if middleware:
-        deepagent_middleware.extend(middleware)
     if interrupt_on is not None:
         deepagent_middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))
+    if middleware is not None:
+        deepagent_middleware.extend(middleware)
 
     return create_agent(
         model,
@@ -154,7 +178,7 @@ def create_deep_agent(
         response_format=response_format,
         context_schema=context_schema,
         checkpointer=checkpointer,
-        store=store,
+        store=store_to_use,
         debug=debug,
         name=name,
         cache=cache,

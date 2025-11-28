@@ -1,7 +1,8 @@
 """Middleware for providing subagents to an agent via a `task` tool."""
 
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, NotRequired, TypedDict, cast
+from typing import Any, TypedDict, cast
+from typing_extensions import NotRequired
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnConfig
@@ -272,6 +273,7 @@ def _get_subagents(
             system_prompt=agent_["system_prompt"],
             tools=_tools,
             middleware=_middleware,
+            checkpointer=False,
         )
     return agents, subagent_descriptions
 
@@ -317,7 +319,7 @@ def _create_task_tool(
         return Command(
             update={
                 **state_update,
-                "messages": [ToolMessage(result["messages"][-1].text, tool_call_id=tool_call_id)],
+                "messages": [ToolMessage(result["messages"][-1].content, tool_call_id=tool_call_id)],
             }
         )
 

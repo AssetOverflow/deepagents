@@ -287,6 +287,7 @@ See the [agent harness documentation](https://docs.langchain.com/oss/python/deep
 | **AnthropicPromptCachingMiddleware** | Caches system prompts to reduce costs (Anthropic only) |
 | **PatchToolCallsMiddleware** | Fixes dangling tool calls from interruptions |
 | **HumanInTheLoopMiddleware** | Pauses execution for human approval (requires `interrupt_on` config) |
+| **ToolPolicyMiddleware** | Optional deny-by-default filtering and guarding for user-supplied tool policies |
 
 ## Built-in prompts
 

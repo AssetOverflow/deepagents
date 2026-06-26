@@ -230,10 +230,13 @@ def _format_task_description_for_result_mode(task_description: str, result_mode:
     """Adjust the task tool description for the configured result mode."""
     if result_mode != "proposal_only":
         return task_description
-    return task_description.replace(
-        "4. The agent's outputs should generally be trusted",
-        "4. The agent's outputs are proposal-only: reconcile and validate them before relying on them",
-    ) + PROPOSAL_ONLY_TASK_DESCRIPTION_NOTE
+    return (
+        task_description.replace(
+            "4. The agent's outputs should generally be trusted",
+            "4. The agent's outputs are proposal-only: reconcile and validate them before relying on them",
+        )
+        + PROPOSAL_ONLY_TASK_DESCRIPTION_NOTE
+    )
 
 
 def _format_subagent_result_content(content: Any, *, subagent_type: str, result_mode: SubagentResultMode) -> Any:

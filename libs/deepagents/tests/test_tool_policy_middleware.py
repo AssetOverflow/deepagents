@@ -33,7 +33,7 @@ def write_file() -> str:
 
 
 def _tool_names(tools: list[Any]) -> list[str]:
-    return [tool.name if hasattr(tool, "name") else tool["name"] for tool in tools]
+    return [candidate.name if hasattr(candidate, "name") else candidate["name"] for candidate in tools]
 
 
 def test_filter_tools_is_deny_by_default() -> None:

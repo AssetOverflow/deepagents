@@ -9,6 +9,8 @@ from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deepagents.middleware.audit import AuditEvent, AuditEventSink, emit_audit_event
+
 
 @dataclass(frozen=True)
 class ToolPolicyDecision:
@@ -49,6 +51,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
         deny_by_default: bool = True,
         denial_message: str | None = None,
         on_denied_tool_call: Callable[[ToolPolicyEvent], None] | None = None,
+        audit_sink: AuditEventSink | None = None,
     ) -> None:
         """Initialize the tool policy middleware."""
         self.allow_tools = frozenset(allow_tools or set())
@@ -56,6 +59,7 @@ class ToolPolicyMiddleware(AgentMiddleware):
         self.deny_by_default = deny_by_default
         self.denial_message = denial_message or "Tool call denied by ToolPolicyMiddleware"
         self.on_denied_tool_call = on_denied_tool_call
+        self.audit_sink = audit_sink
 
     def decide(self, tool_name: str) -> ToolPolicyDecision:
         """Return whether ``tool_name`` is allowed by this policy."""
@@ -123,16 +127,27 @@ class ToolPolicyMiddleware(AgentMiddleware):
 
     def _denial_message(self, request: ToolCallRequest, decision: ToolPolicyDecision, *, stage: str) -> ToolMessage:
         event = ToolPolicyEvent(decision.tool_name, decision.reason, stage)
-        self._emit(event)
+        self._emit(event, tool_call_id=request.tool_call.get("id"))
         return ToolMessage(
             content=f"{self.denial_message}: {decision.reason}.",
             name=decision.tool_name,
             tool_call_id=request.tool_call.get("id", "tool-policy-denial"),
         )
 
-    def _emit(self, event: ToolPolicyEvent) -> None:
+    def _emit(self, event: ToolPolicyEvent, tool_call_id: str | None = None) -> None:
         if self.on_denied_tool_call is not None:
             self.on_denied_tool_call(event)
+        emit_audit_event(
+            self.audit_sink,
+            AuditEvent(
+                stage="tool_call_denied" if event.stage == "tool_call" else "model_filter",
+                status="denied" if event.stage == "tool_call" else "filtered",
+                tool_name=event.tool_name,
+                tool_call_id=tool_call_id,
+                reason=event.reason,
+                metadata={"tool_policy_stage": event.stage},
+            ),
+        )
 
     def _matches_any(self, tool_name: str, patterns: frozenset[str]) -> bool:
         return any(_pattern_matches(tool_name, pattern) for pattern in patterns)

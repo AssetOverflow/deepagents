@@ -104,7 +104,7 @@ def _reject_unwired_options(
     if (
         redis_settings is not None
         or enable_redis_cache
-        or enable_redis_store is not None
+        or enable_redis_store is True
         or redis_cache_default_ttl_seconds is not None
     ):
         msg = (

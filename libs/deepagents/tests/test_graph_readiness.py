@@ -80,3 +80,23 @@ def test_backend_raises_not_implemented_error():
             tools=[],
             backend=object(),  # type: ignore[arg-type]
         )
+
+
+def test_enable_redis_store_false_is_allowed(monkeypatch):
+    class DummySubAgentMiddleware:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class DummyGraph:
+        def with_config(self, config):
+            return self
+
+    monkeypatch.setattr(graph_module, "create_agent", lambda *args, **kwargs: DummyGraph())
+    monkeypatch.setattr(graph_module, "SubAgentMiddleware", DummySubAgentMiddleware)
+    monkeypatch.setattr(graph_module, "_create_core_middleware", lambda model, trigger, keep: [])
+
+    graph_module.create_deep_agent(
+        model="anthropic:claude-sonnet-4-5",
+        tools=[],
+        enable_redis_store=False,
+    )

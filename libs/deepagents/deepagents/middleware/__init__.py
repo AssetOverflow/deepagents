@@ -2,7 +2,7 @@
 
 from deepagents.middleware.audit import AuditEvent, AuditEventMiddleware, AuditEventSink
 from deepagents.middleware.filesystem import FilesystemMiddleware
-from deepagents.middleware.subagents import CompiledSubAgent, SubAgent, SubAgentMiddleware
+from deepagents.middleware.subagents import CompiledSubAgent, SubAgent, SubAgentMiddleware, SubagentResultMode
 from deepagents.middleware.tool_policy import ToolPolicyDecision, ToolPolicyEvent, ToolPolicyMiddleware
 
 __all__ = [
@@ -13,6 +13,7 @@ __all__ = [
     "FilesystemMiddleware",
     "SubAgent",
     "SubAgentMiddleware",
+    "SubagentResultMode",
     "ToolPolicyDecision",
     "ToolPolicyEvent",
     "ToolPolicyMiddleware",

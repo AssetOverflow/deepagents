@@ -29,7 +29,6 @@ from deepagents.middleware import (
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
 
 DEFAULT_GOVERNED_ALLOW_TOOLS = frozenset({"read_todos", "write_todos", "ls", "read_file", "glob", "grep", "task"})
-DEFAULT_GOVERNED_DENY_TOOLS = frozenset({"write_file", "edit_file", "execute"})
 
 
 def create_governed_deep_agent(
@@ -55,7 +54,7 @@ def create_governed_deep_agent(
     name: str | None = None,
     cache: BaseCache | None = None,
 ) -> CompiledStateGraph:
-    """Create a deep agent with the governed seams enabled.
+    """Create a deep agent with governed seams enabled.
 
     This factory is opt-in. It does not change ``create_deep_agent`` defaults.
     """
@@ -69,7 +68,7 @@ def create_governed_deep_agent(
     governed_middleware: list[AgentMiddleware] = [
         ToolPolicyMiddleware(
             allow_tools=allow_tools if allow_tools is not None else DEFAULT_GOVERNED_ALLOW_TOOLS,
-            deny_tools=deny_tools if deny_tools is not None else DEFAULT_GOVERNED_DENY_TOOLS,
+            deny_tools=deny_tools,
             deny_by_default=True,
             audit_sink=audit_sink,
         ),
@@ -78,9 +77,9 @@ def create_governed_deep_agent(
             memory_prefixes=memory_prefixes,
             audit_sink=audit_sink,
         ),
-        AuditEventMiddleware(audit_sink) if audit_sink is not None else None,
     ]
-    governed_middleware = [item for item in governed_middleware if item is not None]
+    if audit_sink is not None:
+        governed_middleware.append(AuditEventMiddleware(audit_sink))
 
     deepagent_middleware: list[AgentMiddleware] = [
         *core_middleware_stack,

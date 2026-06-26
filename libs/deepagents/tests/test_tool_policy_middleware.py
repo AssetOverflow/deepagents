@@ -1,4 +1,6 @@
-import pytest
+import asyncio
+from typing import Any
+
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 
@@ -6,15 +8,15 @@ from deepagents.middleware import ToolPolicyEvent, ToolPolicyMiddleware
 
 
 class FakeModelRequest:
-    def __init__(self, tools):
+    def __init__(self, tools: list[Any]) -> None:
         self.tools = tools
 
-    def override(self, *, tools):
+    def override(self, *, tools: list[Any]) -> "FakeModelRequest":
         return FakeModelRequest(tools)
 
 
 class FakeToolCallRequest:
-    def __init__(self, name: str, tool_call_id: str = "call-1"):
+    def __init__(self, name: str, tool_call_id: str = "call-1") -> None:
         self.tool_call = {"name": name, "id": tool_call_id}
 
 
@@ -30,12 +32,16 @@ def write_file() -> str:
     return "write"
 
 
+def _tool_names(tools: list[Any]) -> list[str]:
+    return [tool.name if hasattr(tool, "name") else tool["name"] for tool in tools]
+
+
 def test_filter_tools_is_deny_by_default() -> None:
     middleware = ToolPolicyMiddleware(allow_tools={"read_file"})
 
     filtered = middleware.filter_tools([read_file, write_file, {"name": "github.list_prs"}])
 
-    assert [tool.name if hasattr(tool, "name") else tool["name"] for tool in filtered] == ["read_file"]
+    assert _tool_names(filtered) == ["read_file"]
 
 
 def test_deny_tools_override_allow_tools() -> None:
@@ -64,7 +70,7 @@ def test_model_call_filters_request_tools_and_emits_events() -> None:
 
     result = middleware.wrap_model_call(request, handler)  # type: ignore[arg-type]
 
-    assert [tool.name if hasattr(tool, "name") else tool["name"] for tool in result.tools] == ["read_file"]
+    assert _tool_names(result.tools) == ["read_file"]
     assert [(event.tool_name, event.stage) for event in events] == [
         ("write_file", "model_filter"),
         ("github.list_prs", "model_filter"),
@@ -103,16 +109,19 @@ def test_tool_call_guard_allows_permitted_tool() -> None:
     assert result.tool_call_id == "call-allowed"
 
 
-@pytest.mark.asyncio
-async def test_async_tool_call_guard() -> None:
-    middleware = ToolPolicyMiddleware(allow_tools={"read_file"})
-    request = FakeToolCallRequest("read_file", "call-async")
+def test_async_tool_call_guard() -> None:
+    async def run() -> ToolMessage:
+        middleware = ToolPolicyMiddleware(allow_tools={"read_file"})
+        request = FakeToolCallRequest("read_file", "call-async")
 
-    async def handler(next_request: FakeToolCallRequest) -> ToolMessage:
-        return ToolMessage(content="ok", name=next_request.tool_call["name"], tool_call_id=next_request.tool_call["id"])
+        async def handler(next_request: FakeToolCallRequest) -> ToolMessage:
+            return ToolMessage(content="ok", name=next_request.tool_call["name"], tool_call_id=next_request.tool_call["id"])
 
-    result = await middleware.awrap_tool_call(request, handler)  # type: ignore[arg-type]
+        result = await middleware.awrap_tool_call(request, handler)  # type: ignore[arg-type]
+        assert isinstance(result, ToolMessage)
+        return result
 
-    assert isinstance(result, ToolMessage)
+    result = asyncio.run(run())
+
     assert result.content == "ok"
     assert result.tool_call_id == "call-async"

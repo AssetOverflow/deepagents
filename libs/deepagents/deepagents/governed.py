@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnConfig
+from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnConfig, TodoListMiddleware
+from langchain.agents.middleware.summarization import SummarizationMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain.agents.structured_output import ResponseFormat
+from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.cache.base import BaseCache
@@ -16,19 +18,37 @@ from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
 
 from deepagents.backends import ReadOnlyFilesystemBackend
-from deepagents.graph import BASE_AGENT_PROMPT, _create_core_middleware, get_default_model
+from deepagents.graph import BASE_AGENT_PROMPT, DEFAULT_CONTEXT_MESSAGES_TO_KEEP, PROACTIVE_SUMMARY_THRESHOLD, get_default_model
 from deepagents.middleware import (
     AuditEventMiddleware,
     AuditEventSink,
+    FilesystemMiddleware,
     MemoryPolicyMiddleware,
     MemoryPolicyMode,
     SubAgentMiddleware,
     SubagentResultMode,
     ToolPolicyMiddleware,
 )
+from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
 
 DEFAULT_GOVERNED_ALLOW_TOOLS = frozenset({"read_todos", "write_todos", "ls", "read_file", "glob", "grep", "task"})
+
+
+def _create_governed_core_middleware(model: str | BaseChatModel, backend: ReadOnlyFilesystemBackend) -> list[AgentMiddleware]:
+    """Create the core middleware stack for governed agents."""
+    return [
+        TodoListMiddleware(),
+        FilesystemMiddleware(backend=backend),
+        SummarizationMiddleware(
+            model=model,
+            trigger=("tokens", PROACTIVE_SUMMARY_THRESHOLD),  # type: ignore[arg-type]
+            keep=("messages", DEFAULT_CONTEXT_MESSAGES_TO_KEEP),  # type: ignore[arg-type]
+            trim_tokens_to_summarize=None,
+        ),
+        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+        PatchToolCallsMiddleware(),
+    ]
 
 
 def create_governed_deep_agent(
@@ -62,8 +82,8 @@ def create_governed_deep_agent(
         model = get_default_model()
 
     backend = ReadOnlyFilesystemBackend(root_dir=root_dir)
-    core_middleware_stack = _create_core_middleware(model, backend=backend)
-    subagent_middleware_stack = _create_core_middleware(model, backend=backend)
+    core_middleware_stack = _create_governed_core_middleware(model, backend)
+    subagent_middleware_stack = _create_governed_core_middleware(model, backend)
 
     governed_middleware: list[AgentMiddleware] = [
         ToolPolicyMiddleware(

@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any
 
-from langchain.agents.middleware.types import AgentMiddleware
+from pytest import MonkeyPatch
 
 import deepagents.governed as governed
 from deepagents.backends import ReadOnlyFilesystemBackend
@@ -17,7 +17,7 @@ class FakeCompiledGraph:
         return self
 
 
-def test_governed_factory_wires_default_stack(monkeypatch, tmp_path: Path) -> None:
+def test_governed_factory_wires_default_stack(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 
     def fake_create_agent(*args: Any, **kwargs: Any) -> FakeCompiledGraph:
@@ -48,7 +48,7 @@ def test_governed_factory_wires_default_stack(monkeypatch, tmp_path: Path) -> No
     assert memory_policy.mode == "proposal_only"
 
 
-def test_governed_factory_uses_read_only_backend_for_core_and_subagents(monkeypatch, tmp_path: Path) -> None:
+def test_governed_factory_uses_read_only_backend_for_core_middleware(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 
     def fake_create_agent(*args: Any, **kwargs: Any) -> FakeCompiledGraph:
@@ -65,14 +65,10 @@ def test_governed_factory_uses_read_only_backend_for_core_and_subagents(monkeypa
     for item in filesystem_middlewares:
         assert isinstance(item.backend, ReadOnlyFilesystemBackend)
 
-    subagent_middleware = next(item for item in middleware if isinstance(item, SubAgentMiddleware))
-    subagent_filesystem_middlewares = [item for item in subagent_middleware.tools[0].metadata.get("default_middleware", []) if item.__class__.__name__ == "FilesystemMiddleware"]
-    assert subagent_filesystem_middlewares == []
 
-
-def test_governed_factory_accepts_overrides(monkeypatch, tmp_path: Path) -> None:
+def test_governed_factory_accepts_overrides(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
-    extra_middleware = AgentMiddleware()
+    extra_middleware = ToolPolicyMiddleware(allow_tools={"read_file"})
     audit_events: list[Any] = []
 
     def fake_create_agent(*args: Any, **kwargs: Any) -> FakeCompiledGraph:

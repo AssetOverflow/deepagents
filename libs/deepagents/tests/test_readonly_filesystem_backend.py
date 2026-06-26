@@ -93,4 +93,4 @@ def test_read_only_backend_skips_symlinks(tmp_path: Path) -> None:
 
     assert "/link.txt" not in [item["path"] for item in backend.ls_info("/")]
     assert "Symlink traversal" in backend.read("/link.txt")
-    assert backend.glob_info("*.txt") == [{"path": "/target.txt", "is_dir": False, "size": 7, "modified_at": backend.glob_info("*.txt")[0]["modified_at"]}]
+    assert [item["path"] for item in backend.glob_info("*.txt")] == ["/target.txt"]

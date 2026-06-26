@@ -5,7 +5,7 @@ from pytest import MonkeyPatch
 
 import deepagents.governed as governed
 from deepagents.backends import ReadOnlyFilesystemBackend
-from deepagents.middleware import AuditEventMiddleware, MemoryPolicyMiddleware, SubAgentMiddleware, ToolPolicyMiddleware
+from deepagents.middleware import AuditEventMiddleware, FilesystemMiddleware, MemoryPolicyMiddleware, SubAgentMiddleware, ToolPolicyMiddleware
 
 
 class FakeCompiledGraph:
@@ -60,7 +60,7 @@ def test_governed_factory_uses_read_only_backend_for_core_middleware(monkeypatch
     governed.create_governed_deep_agent(model="fake-model", root_dir=tmp_path)
 
     middleware = captured["kwargs"]["middleware"]
-    filesystem_middlewares = [item for item in middleware if item.__class__.__name__ == "FilesystemMiddleware"]
+    filesystem_middlewares = [item for item in middleware if isinstance(item, FilesystemMiddleware)]
     assert filesystem_middlewares
     for item in filesystem_middlewares:
         assert isinstance(item.backend, ReadOnlyFilesystemBackend)

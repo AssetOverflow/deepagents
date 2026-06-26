@@ -38,7 +38,10 @@ This plan does not implement:
 - source control automation;
 - remote sandbox integrations;
 - autonomous file writes;
-- hidden model calls.
+- hidden model calls;
+- Rust acceleration;
+- MLX summarization;
+- UMA-specific runtime behavior.
 
 ## Design principle
 
@@ -210,6 +213,42 @@ research.search
 
 Tool policy should be able to filter by namespace, original name, source, and risk classification.
 
+### 8. Mechanical sympathy and acceleration seams
+
+Governed consumers may later want to combine deepagents with Rust-backed validation, MLX/local summarization, and Apple Silicon UMA-aware context handling. This plan should leave room for those efforts without making them part of the initial runtime surface.
+
+The intended posture is:
+
+```text
+Rust accelerates stable validation and canonicalization only after parity evidence.
+MLX accelerates local summarization/compression only as derived review artifacts.
+UMA-aware design keeps context movement explicit, bounded, and provenance-carrying.
+```
+
+Potential generic seams:
+
+- validation backend hooks for policy/audit/event records;
+- canonical JSON or event hashing hooks;
+- summary backend hooks with source refs and omission metadata;
+- context offload hooks that can choose local MLX summarizers later;
+- batch file metadata/event processing hooks that avoid unnecessary copies;
+- audit/event formats that are stable enough for Rust parity checks.
+
+These are not immediate implementation requirements. They are constraints on the shape of future APIs:
+
+- keep event records structured and schema-stable;
+- keep source refs and hashes explicit;
+- avoid hiding large context movement behind opaque callbacks;
+- make summaries derived and non-authoritative;
+- make acceleration optional and replaceable;
+- keep Python behavior as the reference until parity tests say otherwise.
+
+For builder-II, this lines up with its performance tracks:
+
+- Rust validation remains a measured candidate accelerator, not runtime authority;
+- MLX context compression remains a provenance-preserving review artifact path, not memory truth;
+- Apple UMA mechanical sympathy favors local, explicit, bounded context transforms rather than remote hidden calls.
+
 ## Policy object sketch
 
 A generic policy object could look like:
@@ -243,6 +282,9 @@ That implies these requirements:
 - persistent memory writes can be disabled or converted to proposals;
 - tool calls can emit events for builder-II audit artifacts;
 - unknown tools fail closed in governed mode;
+- structured events remain suitable for future Rust validation/parity;
+- summarization/offloading can later route to local MLX backends while preserving source refs;
+- large context flows remain explicit enough for UMA-aware optimization;
 - existing non-governed deepagents behavior remains available for ordinary users.
 
 ## Proposed implementation order
@@ -275,6 +317,10 @@ Allow persistent memory writes to be disabled or emitted as proposals.
 
 Add a convenience factory that wires the above safely.
 
+### PR 8: acceleration readiness hooks
+
+Add optional hooks for validation, hashing, summarization, and context offload backends without enabling Rust, MLX, or UMA-specific behavior by default.
+
 ## Test expectations
 
 Future implementation tests should verify:
@@ -287,8 +333,10 @@ Future implementation tests should verify:
 - denied calls emit audit events;
 - subagent outputs can be proposal-only;
 - memory writes can be denied or emitted as proposals;
+- event records are deterministic enough for parity validation;
+- summary/offload records preserve source refs and non-authority status;
 - default `create_deep_agent` behavior remains backward compatible.
 
 ## Governing sentence
 
-Deepagents should become easier to embed inside governed systems by exposing policy, backend, trust-boundary, memory, and audit seams while preserving its general-purpose agent harness for existing users.
+Deepagents should become easier to embed inside governed systems by exposing policy, backend, trust-boundary, memory, audit, and acceleration-readiness seams while preserving its general-purpose agent harness for existing users.

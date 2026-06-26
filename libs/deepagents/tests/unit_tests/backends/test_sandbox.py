@@ -368,7 +368,9 @@ class TestGraphConstants:
         result = _create_core_middleware(mock_model, trigger, keep)
 
         assert isinstance(result, list)
-        assert len(result) == 5  # TodoListMiddleware, FilesystemMiddleware, SummarizationMiddleware, AnthropicPromptCachingMiddleware, PatchToolCallsMiddleware
+        assert (
+            len(result) == 5
+        )  # TodoListMiddleware, FilesystemMiddleware, SummarizationMiddleware, AnthropicPromptCachingMiddleware, PatchToolCallsMiddleware
 
     def test_create_core_middleware_includes_expected_types(self):
         """Test _create_core_middleware returns expected middleware types."""

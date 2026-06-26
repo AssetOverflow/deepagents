@@ -627,7 +627,7 @@ def _get_file_data_from_state(state: FilesystemState, file_path: str) -> FileDat
 
 
 def _get_backend(
-    backend: "BACKEND_TYPES | None",  # noqa: F821
+    backend: "BACKEND_TYPES | None",
     runtime: "ToolRuntime[Any, Any]",
 ) -> "BackendProtocol":
     """Resolve a backend from a factory/instance or fall back to StateBackend.
@@ -1035,12 +1035,15 @@ class FilesystemMiddleware(AgentMiddleware):
         # Default StateBackend
         agent = create_agent(middleware=[FilesystemMiddleware()])
 
+
         # Custom backend factory
         def make_backend(rt):
             return CompositeBackend(
                 default=StateBackend(rt),
                 routes={"/memories/": StoreBackend(rt)},
             )
+
+
         agent = create_agent(middleware=[FilesystemMiddleware(backend=make_backend)])
         ```
     """
@@ -1074,7 +1077,7 @@ class FilesystemMiddleware(AgentMiddleware):
         if backend is None:
             from deepagents.backends.state import StateBackend as _StateBackend
 
-            self.backend: "BACKEND_TYPES" = lambda rt: _StateBackend(rt)
+            self.backend: BACKEND_TYPES = lambda rt: _StateBackend(rt)
         else:
             self.backend = backend
 
@@ -1126,10 +1129,7 @@ class FilesystemMiddleware(AgentMiddleware):
             The model response from the handler.
         """
         # Check if execute tool is present and if backend supports it
-        has_execute_tool = any(
-            (tool.name if hasattr(tool, "name") else tool.get("name")) == "execute"
-            for tool in request.tools
-        )
+        has_execute_tool = any((tool.name if hasattr(tool, "name") else tool.get("name")) == "execute" for tool in request.tools)
 
         backend_supports_execution = False
         if has_execute_tool:
@@ -1139,11 +1139,7 @@ class FilesystemMiddleware(AgentMiddleware):
 
             # If execute tool exists but backend doesn't support it, filter it out
             if not backend_supports_execution:
-                filtered_tools = [
-                    tool
-                    for tool in request.tools
-                    if (tool.name if hasattr(tool, "name") else tool.get("name")) != "execute"
-                ]
+                filtered_tools = [tool for tool in request.tools if (tool.name if hasattr(tool, "name") else tool.get("name")) != "execute"]
                 request = request.override(tools=filtered_tools)
                 has_execute_tool = False
 
@@ -1157,11 +1153,7 @@ class FilesystemMiddleware(AgentMiddleware):
             system_prompt = "\n\n".join(prompt_parts)
 
         if system_prompt:
-            request = request.override(
-                system_prompt=request.system_prompt + "\n\n" + system_prompt
-                if request.system_prompt
-                else system_prompt
-            )
+            request = request.override(system_prompt=request.system_prompt + "\n\n" + system_prompt if request.system_prompt else system_prompt)
 
         return handler(request)
 
@@ -1179,10 +1171,7 @@ class FilesystemMiddleware(AgentMiddleware):
         Returns:
             The model response from the handler.
         """
-        has_execute_tool = any(
-            (tool.name if hasattr(tool, "name") else tool.get("name")) == "execute"
-            for tool in request.tools
-        )
+        has_execute_tool = any((tool.name if hasattr(tool, "name") else tool.get("name")) == "execute" for tool in request.tools)
 
         backend_supports_execution = False
         if has_execute_tool:
@@ -1190,11 +1179,7 @@ class FilesystemMiddleware(AgentMiddleware):
             backend_supports_execution = _supports_execution(resolved)
 
             if not backend_supports_execution:
-                filtered_tools = [
-                    tool
-                    for tool in request.tools
-                    if (tool.name if hasattr(tool, "name") else tool.get("name")) != "execute"
-                ]
+                filtered_tools = [tool for tool in request.tools if (tool.name if hasattr(tool, "name") else tool.get("name")) != "execute"]
                 request = request.override(tools=filtered_tools)
                 has_execute_tool = False
 
@@ -1207,11 +1192,7 @@ class FilesystemMiddleware(AgentMiddleware):
             system_prompt = "\n\n".join(prompt_parts)
 
         if system_prompt:
-            request = request.override(
-                system_prompt=request.system_prompt + "\n\n" + system_prompt
-                if request.system_prompt
-                else system_prompt
-            )
+            request = request.override(system_prompt=request.system_prompt + "\n\n" + system_prompt if request.system_prompt else system_prompt)
 
         return await handler(request)
 
@@ -1270,10 +1251,7 @@ class FilesystemMiddleware(AgentMiddleware):
             return file_path, replacement, files_update
 
         def _is_too_large(content: str) -> bool:
-            return bool(
-                self.tool_token_limit_before_evict
-                and len(content) > 4 * self.tool_token_limit_before_evict
-            )
+            return bool(self.tool_token_limit_before_evict and len(content) > 4 * self.tool_token_limit_before_evict)
 
         if isinstance(tool_result, ToolMessage) and isinstance(tool_result.content, str):
             content = tool_result.content
@@ -1350,4 +1328,3 @@ class FilesystemMiddleware(AgentMiddleware):
         tool_result = await handler(request)
         runtime = getattr(request, "runtime", None)
         return self._intercept_large_tool_result(tool_result, runtime)
-

@@ -74,7 +74,8 @@ def test_redis_settings_raise_not_implemented_error():
 
 
 def test_backend_is_accepted(monkeypatch):
-    """backend parameter is now fully wired; passing it should NOT raise."""
+    """Backend parameter is now fully wired; passing it should NOT raise."""
+
     class DummySubAgentMiddleware:
         def __init__(self, **kwargs):
             self.kwargs = kwargs

@@ -217,6 +217,7 @@ Available backends include:
 
 - **StateBackend** (default): Ephemeral files stored in agent state
 - **FilesystemBackend**: Real disk operations under a root directory
+- **ReadOnlyFilesystemBackend**: Virtual-rooted real disk reads/searches with mutation methods refused
 - **StoreBackend**: Persistent storage using LangGraph Store
 - **CompositeBackend**: Route different paths to different backends
 

@@ -43,9 +43,7 @@ class TestGrpcSandbox:
     def grpc_sandbox(self, mock_pb2, mock_stub):
         """Create a GrpcSandbox with mocked dependencies."""
         with patch("deepagents.backends.sandbox.grpc") as mock_grpc:
-            with patch.object(
-                GrpcSandbox, "__init__", lambda self, endpoint, sandbox_id=None: None
-            ):
+            with patch.object(GrpcSandbox, "__init__", lambda self, endpoint, sandbox_id=None: None):
                 sandbox = GrpcSandbox.__new__(GrpcSandbox)
                 sandbox._rpc_endpoint = "localhost:50051"
                 sandbox._channel = mock_grpc.insecure_channel.return_value
@@ -107,9 +105,7 @@ class TestGrpcSandbox:
         result = grpc_sandbox.read("/test.txt")
 
         assert result == "     1\thello world"
-        mock_pb2.ReadRequest.assert_called_once_with(
-            file_path="/test.txt", offset=0, limit=2000
-        )
+        mock_pb2.ReadRequest.assert_called_once_with(file_path="/test.txt", offset=0, limit=2000)
 
     def test_read_with_offset_limit(self, grpc_sandbox, mock_stub, mock_pb2):
         """Test read file with offset and limit."""
@@ -119,9 +115,7 @@ class TestGrpcSandbox:
 
         result = grpc_sandbox.read("/test.txt", offset=10, limit=100)
 
-        mock_pb2.ReadRequest.assert_called_once_with(
-            file_path="/test.txt", offset=10, limit=100
-        )
+        mock_pb2.ReadRequest.assert_called_once_with(file_path="/test.txt", offset=10, limit=100)
 
     def test_read_rpc_error(self, grpc_sandbox, mock_stub):
         """Test read handles RPC error."""
@@ -147,9 +141,7 @@ class TestGrpcSandbox:
         assert isinstance(result, WriteResult)
         assert result.path == "/test.txt"
         assert result.error is None
-        mock_pb2.WriteRequest.assert_called_once_with(
-            file_path="/test.txt", content="content"
-        )
+        mock_pb2.WriteRequest.assert_called_once_with(file_path="/test.txt", content="content")
 
     def test_write_error(self, grpc_sandbox, mock_stub, mock_pb2):
         """Test write returns error when file exists."""
@@ -376,7 +368,9 @@ class TestGraphConstants:
         result = _create_core_middleware(mock_model, trigger, keep)
 
         assert isinstance(result, list)
-        assert len(result) == 3  # SummarizationMiddleware, AnthropicPromptCachingMiddleware, PatchToolCallsMiddleware
+        assert (
+            len(result) == 5
+        )  # TodoListMiddleware, FilesystemMiddleware, SummarizationMiddleware, AnthropicPromptCachingMiddleware, PatchToolCallsMiddleware
 
     def test_create_core_middleware_includes_expected_types(self):
         """Test _create_core_middleware returns expected middleware types."""
@@ -394,7 +388,7 @@ class TestGraphConstants:
 
         result = _create_core_middleware(mock_model, trigger, keep)
 
-        # Check middleware types
-        assert isinstance(result[0], SummarizationMiddleware)
-        assert isinstance(result[1], AnthropicPromptCachingMiddleware)
-        assert isinstance(result[2], PatchToolCallsMiddleware)
+        # Check middleware types (TodoListMiddleware and FilesystemMiddleware are prepended)
+        assert isinstance(result[2], SummarizationMiddleware)
+        assert isinstance(result[3], AnthropicPromptCachingMiddleware)
+        assert isinstance(result[4], PatchToolCallsMiddleware)

@@ -17,10 +17,10 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
 
+from deepagents.backends.protocol import BackendFactory, BackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent, SubAgentMiddleware
-from deepagents.redis import RedisCache, RedisSettings, RedisStore, create_redis_client
 
 BASE_AGENT_PROMPT = "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
@@ -30,38 +30,6 @@ PROACTIVE_SUMMARY_THRESHOLD = 45000
 
 # Default number of recent messages to keep after summarization.
 DEFAULT_CONTEXT_MESSAGES_TO_KEEP = 6
-
-
-def _create_core_middleware(
-    model: str | BaseChatModel,
-    trigger: tuple[str, float | int],
-    keep: tuple[str, float | int],
-) -> list[AgentMiddleware]:
-    """Factory function for reusable, core middleware components.
-
-    These are middleware that should be consistently applied across both
-    the main agent and subagents for uniform context management.
-
-    Args:
-        model: The language model to use for summarization.
-        trigger: Tuple of (mode, threshold) for when to trigger summarization.
-            Mode is either "fraction" or "tokens".
-        keep: Tuple of (mode, count) for how many messages to keep.
-            Mode is either "fraction" or "messages".
-
-    Returns:
-        List of core middleware instances for summarization, caching, and tool patching.
-    """
-    return [
-        SummarizationMiddleware(
-            model=model,
-            trigger=trigger,  # type: ignore[arg-type]
-            keep=keep,  # type: ignore[arg-type]
-            trim_tokens_to_summarize=None,
-        ),
-        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
-        PatchToolCallsMiddleware(),
-    ]
 
 
 def get_default_model() -> ChatAnthropic:
@@ -78,37 +46,74 @@ def get_default_model() -> ChatAnthropic:
 
 def _create_core_middleware(
     model: str | BaseChatModel,
-    backend: BackendProtocol | BackendFactory | None = None,
+    trigger: tuple[str, float | int] | None = None,
+    keep: tuple[str, float | int] | None = None,
+    *,
+    backend: "BackendProtocol | BackendFactory | None" = None,
 ) -> list[AgentMiddleware]:
-    """Create the core, reusable middleware stack for agents.
-
-    This factory function creates a consistent middleware configuration that can be
-    shared between the main agent and subagents. It includes:
-    - TodoListMiddleware for task planning and progress tracking
-    - FilesystemMiddleware for file operations
-    - SummarizationMiddleware with proactive summarization threshold
-    - AnthropicPromptCachingMiddleware for caching system prompts
-    - PatchToolCallsMiddleware for fixing dangling tool calls
+    """Create the reusable middleware shared by the main agent and subagents.
 
     Args:
         model: The language model to use for summarization.
-        backend: Optional backend for file storage and execution.
+        trigger: Tuple of (mode, threshold) for when to trigger summarization.
+            Mode is either "fraction" or "tokens". Defaults to the proactive
+            token-based threshold.
+        keep: Tuple of (mode, count) for how many messages to keep.
+            Mode is either "fraction" or "messages". Defaults to the standard
+            message-count setting.
+        backend: Optional backend instance or factory for FilesystemMiddleware.
 
     Returns:
-        A list of configured AgentMiddleware instances.
+        A list of configured core middleware instances in order:
+        [TodoListMiddleware, FilesystemMiddleware, SummarizationMiddleware,
+        AnthropicPromptCachingMiddleware, PatchToolCallsMiddleware]
     """
+    resolved_trigger: tuple[str, float | int] = trigger or ("tokens", PROACTIVE_SUMMARY_THRESHOLD)
+    resolved_keep: tuple[str, float | int] = keep or ("messages", DEFAULT_CONTEXT_MESSAGES_TO_KEEP)
     return [
         TodoListMiddleware(),
         FilesystemMiddleware(backend=backend),
         SummarizationMiddleware(
             model=model,
-            trigger=("tokens", PROACTIVE_SUMMARY_THRESHOLD),
-            keep=("messages", DEFAULT_CONTEXT_MESSAGES_TO_KEEP),
+            trigger=resolved_trigger,  # type: ignore[arg-type]
+            keep=resolved_keep,  # type: ignore[arg-type]
             trim_tokens_to_summarize=None,
         ),
         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
         PatchToolCallsMiddleware(),
     ]
+
+
+def _resolve_store(store: BaseStore | None, use_longterm_memory: bool) -> BaseStore | None:
+    """Resolve the store used for agent construction.
+
+    Long-term memory requires an explicit store until Redis-backed store
+    construction is restored behind a tested integration.
+    """
+    if use_longterm_memory and store is None:
+        msg = "use_longterm_memory=True requires an explicit store."
+        raise ValueError(msg)
+    return store
+
+
+def _reject_unwired_options(
+    *,
+    redis_settings: Any | str | None,
+    enable_redis_cache: bool,
+    enable_redis_store: bool | None,
+    redis_cache_default_ttl_seconds: int | None,
+) -> None:
+    """Fail closed for options whose runtime adapters are not wired.
+
+    The ``backend`` parameter is now fully wired (FilesystemMiddleware accepts
+    it), so it is intentionally omitted from this guard.
+    """
+    if redis_settings is not None or enable_redis_cache or enable_redis_store is True or redis_cache_default_ttl_seconds is not None:
+        msg = (
+            "Redis-backed cache/store construction is not available in this package build. "
+            "Pass an explicit cache/store, or wire Redis adapters before enabling Redis options."
+        )
+        raise NotImplementedError(msg)
 
 
 def create_deep_agent(
@@ -123,77 +128,67 @@ def create_deep_agent(
     checkpointer: Checkpointer | None = None,
     store: BaseStore | None = None,
     use_longterm_memory: bool = False,
+    backend: BackendProtocol | BackendFactory | None = None,
     interrupt_on: dict[str, bool | InterruptOnConfig] | None = None,
     debug: bool = False,
     name: str | None = None,
     cache: BaseCache | None = None,
-    redis_settings: RedisSettings | str | None = None,
+    redis_settings: Any | str | None = None,
     enable_redis_cache: bool = False,
     enable_redis_store: bool | None = None,
     redis_cache_default_ttl_seconds: int | None = None,
 ) -> CompiledStateGraph:
     """Create a deep agent.
 
-    This agent will by default have access to a tool to write todos (write_todos),
-    seven file and execution tools: ls, read_file, write_file, edit_file, glob, grep, execute,
-    and a tool to call subagents.
+    This agent will by default have access to a tool to write todos
+    (write_todos), seven file and execution tools: ls, read_file, write_file,
+    edit_file, glob, grep, execute, and a tool to call subagents.
 
-    The execute tool allows running shell commands if the backend implements SandboxBackendProtocol.
-    For non-sandbox backends, the execute tool will return an error message.
+    The execute tool allows running shell commands only when the supplied
+    backend implements SandboxBackendProtocol. For non-sandbox backends, the
+    execute tool returns an error message.
 
-    Redis integration is optional and configured via ``redis_settings``.  When
-    provided, callers can opt into Redis-backed caching and/or the Redis-backed
-    long-term store without manually instantiating the adapters.
+    Redis-backed cache/store construction is intentionally fail-closed in this
+    package build because the Redis adapters are not present. Callers may pass
+    explicit ``cache`` and ``store`` objects directly.
 
     Args:
-        tools: The tools the agent should have access to.
-        system_prompt: The additional instructions the agent should have. Will go in
-            the system prompt.
-        middleware: Additional middleware to apply after standard middleware.
         model: The model to use.
-        subagents: The subagents to use. Each subagent should be a dictionary with the
-            following keys:
-                - `name`
-                - `description` (used by the main agent to decide whether to call the
-                  sub agent)
-                - `prompt` (used as the system prompt in the subagent)
-                - (optional) `tools`
-                - (optional) `model` (either a LanguageModelLike instance or dict
-                  settings)
-                - (optional) `middleware` (list of AgentMiddleware)
+        tools: The tools the agent should have access to.
+        system_prompt: Additional instructions for the agent.
+        middleware: Additional middleware to apply after standard middleware.
+        subagents: Subagents available to the main agent.
         response_format: A structured output response format to use for the agent.
         context_schema: The schema of the deep agent.
         checkpointer: Optional checkpointer for persisting agent state between runs.
-        store: Optional store for persistent storage (required if backend uses StoreBackend).
-        use_longterm_memory: Whether to use longterm memory - you must provide a store
-            in order to use longterm memory.
-        backend: Optional backend for file storage and execution. Pass either a Backend instance
-            or a callable factory like `lambda rt: StateBackend(rt)`. For execution support,
-            use a backend that implements SandboxBackendProtocol.
-        interrupt_on: Optional Dict[str, bool | InterruptOnConfig] mapping tool names to
-            interrupt configs.
+        store: Optional store for persistent storage.
+        use_longterm_memory: Whether to use long-term memory. Requires ``store``.
+        backend: Optional backend for file storage and execution. Pass either a
+            Backend instance or a callable factory like ``lambda rt: StateBackend(rt)``.
+        interrupt_on: Optional mapping of tool names to interrupt configs.
         debug: Whether to enable debug mode. Passed through to create_agent.
         name: The name of the agent. Passed through to create_agent.
         cache: The cache to use for the agent. Passed through to create_agent.
-        redis_settings: Connection settings or URL for Redis-backed capabilities.
-            When a string is supplied it is interpreted as a Redis connection URL;
-            otherwise provide an instance of :class:`~deepagents.redis.RedisSettings`.
-        enable_redis_cache: Whether to automatically configure a Redis cache when
-            ``redis_settings`` are provided and ``cache`` is not supplied.
-        enable_redis_store: Whether to create a Redis-backed store when
-            ``redis_settings`` are provided and ``store`` is not supplied. Defaults
-            to ``use_longterm_memory`` when ``None``.
-        redis_cache_default_ttl_seconds: Default TTL in seconds for Redis cache
-            entries when a TTL is not specified by the caller.
+        redis_settings: Reserved for future Redis-backed capabilities. Raises
+            NotImplementedError when supplied until Redis adapters are restored.
+        enable_redis_cache: Reserved for future Redis-backed cache construction.
+        enable_redis_store: Reserved for future Redis-backed store construction.
+        redis_cache_default_ttl_seconds: Reserved for future Redis cache TTLs.
 
     Returns:
         A configured deep agent.
     """
+    _reject_unwired_options(
+        redis_settings=redis_settings,
+        enable_redis_cache=enable_redis_cache,
+        enable_redis_store=enable_redis_store,
+        redis_cache_default_ttl_seconds=redis_cache_default_ttl_seconds,
+    )
+    store_to_use = _resolve_store(store, use_longterm_memory)
+
     if model is None:
         model = get_default_model()
 
-    # Determine summarization trigger and keep settings
-    # Use proactive threshold for token-based triggering
     if (
         hasattr(model, "profile")
         and model.profile is not None
@@ -204,24 +199,17 @@ def create_deep_agent(
         trigger: tuple[str, float | int] = ("fraction", 0.85)
         keep: tuple[str, float | int] = ("fraction", 0.10)
     else:
-        # Use proactive summarization threshold for early context management
         trigger = ("tokens", PROACTIVE_SUMMARY_THRESHOLD)
         keep = ("messages", DEFAULT_CONTEXT_MESSAGES_TO_KEEP)
 
-    # Create the core, reusable middleware stack for summarization/caching/patching
-    core_middleware_stack = _create_core_middleware(model, trigger, keep)
+    core_middleware_stack = _create_core_middleware(model, trigger, keep, backend=backend)
 
-    # Build the default middleware stack for subagents
-    # Subagents get TodoList + Filesystem + core stack for consistent context management
     subagent_middleware_stack: list[AgentMiddleware] = [
-        TodoListMiddleware(),
-        FilesystemMiddleware(backend=backend),
-        *core_middleware_stack,
+        *_create_core_middleware(model, trigger, keep, backend=backend),
     ]
 
     deepagent_middleware: list[AgentMiddleware] = [
-        TodoListMiddleware(),
-        FilesystemMiddleware(backend=backend),
+        *core_middleware_stack,
         SubAgentMiddleware(
             default_model=model,
             default_tools=tools,
@@ -230,7 +218,6 @@ def create_deep_agent(
             default_interrupt_on=interrupt_on,
             general_purpose_agent=True,
         ),
-        *core_middleware_stack,  # Include Summarization, Caching, Patching for main agent
     ]
     if interrupt_on is not None:
         deepagent_middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))

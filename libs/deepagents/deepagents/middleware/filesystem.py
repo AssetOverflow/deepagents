@@ -5,8 +5,7 @@ import os
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated, Any, Literal
-from typing_extensions import NotRequired
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired
 
 if TYPE_CHECKING:
     from langgraph.runtime import Runtime
@@ -27,20 +26,9 @@ from langgraph.store.base import BaseStore, Item
 from langgraph.types import Command
 from typing_extensions import TypedDict
 
-from deepagents.backends import StateBackend
-
 # Re-export type here for backwards compatibility
 from deepagents.backends.protocol import BACKEND_TYPES as BACKEND_TYPES
-from deepagents.backends.protocol import (
-    BackendProtocol,
-    EditResult,
-    SandboxBackendProtocol,
-    WriteResult,
-)
 from deepagents.backends.utils import (
-    format_content_with_line_numbers,
-    format_grep_matches,
-    sanitize_tool_call_id,
     truncate_if_too_long,
 )
 
@@ -633,21 +621,79 @@ def _get_file_data_from_state(state: FilesystemState, file_path: str) -> FileDat
     return mock_filesystem[file_path]
 
 
-def _ls_tool_generator(custom_description: str | None = None, *, long_term_memory: bool) -> BaseTool:
+# ---------------------------------------------------------------------------
+# Backend helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_backend(
+    backend: "BACKEND_TYPES | None",
+    runtime: "ToolRuntime[Any, Any]",
+) -> "BackendProtocol":
+    """Resolve a backend from a factory/instance or fall back to StateBackend.
+
+    Args:
+        backend: Either a BackendProtocol instance, a callable factory
+            ``(runtime) -> BackendProtocol``, or ``None`` to use StateBackend.
+        runtime: The current tool runtime providing state and store.
+
+    Returns:
+        A concrete BackendProtocol instance ready for use.
+    """
+    from deepagents.backends.state import StateBackend
+
+    if backend is None:
+        return StateBackend(runtime)
+    if callable(backend):
+        return backend(runtime)
+    return backend
+
+
+def _supports_execution(backend: Any) -> bool:
+    """Return True if *backend* implements SandboxBackendProtocol.
+
+    For CompositeBackend, checks whether the *default* backend supports
+    execution, since execution is not path-routed.
+
+    Args:
+        backend: Any backend object to check.
+
+    Returns:
+        True if the backend (or its default, for CompositeBackend) has an
+        ``execute`` method consistent with SandboxBackendProtocol.
+    """
+    from deepagents.backends.protocol import SandboxBackendProtocol
+
+    # CompositeBackend delegates execute() to its default backend
+    default = getattr(backend, "default", None)
+    if default is not None:
+        return isinstance(default, SandboxBackendProtocol)
+    return isinstance(backend, SandboxBackendProtocol)
+
+
+# ---------------------------------------------------------------------------
+# Tool generators — each generator captures *backend* in its closure so all
+# generated tools resolve the backend at call-time via _get_backend().
+# ---------------------------------------------------------------------------
+
+
+def _ls_tool_generator(
+    custom_description: str | None = None,
+    *,
+    long_term_memory: bool,  # noqa: ARG001
+    backend: "BACKEND_TYPES | None" = None,
+) -> BaseTool:
     """Generate the ls (list files) tool.
 
     Args:
         custom_description: Optional custom description for the tool.
-        long_term_memory: Whether to enable longterm memory support.
+        long_term_memory: Unused; retained for call-site compatibility.
+        backend: Optional backend instance or factory.
 
     Returns:
-        Configured ls tool that lists files from state and optionally from longterm store.
+        Configured ls tool that lists files from the resolved backend.
     """
-    tool_description = LIST_FILES_TOOL_DESCRIPTION
-    if custom_description:
-        tool_description = custom_description
-    elif long_term_memory:
-        tool_description += LIST_FILES_TOOL_DESCRIPTION_LONGTERM_SUPPLEMENT
+    tool_description = custom_description or LIST_FILES_TOOL_DESCRIPTION
 
     @tool(description=tool_description)
     def ls(runtime: ToolRuntime[None, FilesystemState], path: str) -> str:
@@ -661,325 +707,282 @@ def _ls_tool_generator(custom_description: str | None = None, *, long_term_memor
     return ls
 
 
-def _read_file_tool_generator(custom_description: str | None = None, *, long_term_memory: bool) -> BaseTool:
+def _read_file_tool_generator(
+    custom_description: str | None = None,
+    *,
+    long_term_memory: bool,  # noqa: ARG001
+    backend: "BACKEND_TYPES | None" = None,
+) -> BaseTool:
     """Generate the read_file tool.
 
     Args:
         custom_description: Optional custom description for the tool.
-        long_term_memory: Whether to enable longterm memory support.
+        long_term_memory: Unused; retained for call-site compatibility.
+        backend: Optional backend instance or factory.
 
     Returns:
-        Configured read_file tool that reads files from state and optionally from longterm store.
+        Configured read_file tool that reads files from the resolved backend.
     """
-    tool_description = READ_FILE_TOOL_DESCRIPTION
-    if custom_description:
-        tool_description = custom_description
-    elif long_term_memory:
-        tool_description += READ_FILE_TOOL_DESCRIPTION_LONGTERM_SUPPLEMENT
+    tool_description = custom_description or READ_FILE_TOOL_DESCRIPTION
 
-    def _read_file_data_content(file_data: FileData, offset: int, limit: int) -> str:
-        """Read and format file content with line numbers.
-
-        Args:
-            file_data: The file data to read.
-            offset: Line offset to start reading from (0-indexed).
-            limit: Maximum number of lines to read.
-
-        Returns:
-            Formatted file content with line numbers, or an error message.
-        """
-        content = _file_data_to_string(file_data)
-        empty_msg = _check_empty_content(content)
-        if empty_msg:
-            return empty_msg
-        lines = content.splitlines()
-        start_idx = offset
-        end_idx = min(start_idx + limit, len(lines))
-        if start_idx >= len(lines):
-            return f"Error: Line offset {offset} exceeds file length ({len(lines)} lines)"
-        selected_lines = lines[start_idx:end_idx]
-        return _format_content_with_line_numbers(selected_lines, format_style="tab", start_line=start_idx + 1)
-
-    if long_term_memory:
-
-        @tool(description=tool_description)
-        def read_file(
-            file_path: str,
-            runtime: ToolRuntime[None, FilesystemState],
-            offset: int = DEFAULT_READ_OFFSET,
-            limit: int = DEFAULT_READ_LIMIT,
-        ) -> str:
-            file_path = _validate_path(file_path)
-            if _has_memories_prefix(file_path):
-                stripped_file_path = _strip_memories_prefix(file_path)
-                store = _get_store(runtime)
-                namespace = _get_namespace()
-                item: Item | None = store.get(namespace, stripped_file_path)
-                if item is None:
-                    return f"Error: File '{file_path}' not found"
-                file_data = _convert_store_item_to_file_data(item)
-            else:
-                try:
-                    file_data = _get_file_data_from_state(runtime.state, file_path)
-                except ValueError as e:
-                    return str(e)
-            return _read_file_data_content(file_data, offset, limit)
-
-    else:
-
-        @tool(description=tool_description)
-        def read_file(
-            file_path: str,
-            runtime: ToolRuntime[None, FilesystemState],
-            offset: int = DEFAULT_READ_OFFSET,
-            limit: int = DEFAULT_READ_LIMIT,
-        ) -> str:
-            file_path = _validate_path(file_path)
-            try:
-                file_data = _get_file_data_from_state(runtime.state, file_path)
-            except ValueError as e:
-                return str(e)
-            return _read_file_data_content(file_data, offset, limit)
+    @tool(description=tool_description)
+    def read_file(
+        file_path: str,
+        runtime: ToolRuntime[None, FilesystemState],
+        offset: int = DEFAULT_READ_OFFSET,
+        limit: int = DEFAULT_READ_LIMIT,
+    ) -> str:
+        file_path = _validate_path(file_path)
+        resolved_backend = _get_backend(backend, runtime)
+        return resolved_backend.read(file_path, offset=offset, limit=limit)
 
     return read_file
 
 
-def _write_file_tool_generator(custom_description: str | None = None, *, long_term_memory: bool) -> BaseTool:
+def _write_file_tool_generator(
+    custom_description: str | None = None,
+    *,
+    long_term_memory: bool,  # noqa: ARG001
+    backend: "BACKEND_TYPES | None" = None,
+) -> BaseTool:
     """Generate the write_file tool.
 
     Args:
         custom_description: Optional custom description for the tool.
-        long_term_memory: Whether to enable longterm memory support.
+        long_term_memory: Unused; retained for call-site compatibility.
+        backend: Optional backend instance or factory.
 
     Returns:
-        Configured write_file tool that creates new files in state or longterm store.
+        Configured write_file tool that creates new files via the resolved backend.
     """
-    tool_description = WRITE_FILE_TOOL_DESCRIPTION
-    if custom_description:
-        tool_description = custom_description
-    elif long_term_memory:
-        tool_description += WRITE_FILE_TOOL_DESCRIPTION_LONGTERM_SUPPLEMENT
+    tool_description = custom_description or WRITE_FILE_TOOL_DESCRIPTION
 
-    def _write_file_to_state(state: FilesystemState, tool_call_id: str, file_path: str, content: str) -> Command | str:
-        """Write a new file to the filesystem state.
-
-        Args:
-            state: The current filesystem state.
-            tool_call_id: ID of the tool call for generating ToolMessage.
-            file_path: The path where the file should be written.
-            content: The content to write to the file.
-
-        Returns:
-            Command to update state with new file, or error string if file exists.
-        """
-        mock_filesystem = state.get("files", {})
-        existing = mock_filesystem.get(file_path)
-        if existing:
-            return f"Cannot write to {file_path} because it already exists. Read and then make an edit, or write to a new path."
-        new_file_data = _create_file_data(content)
-        return Command(
-            update={
-                "files": {file_path: new_file_data},
-                "messages": [ToolMessage(f"Updated file {file_path}", tool_call_id=tool_call_id)],
-            }
-        )
-
-    if long_term_memory:
-
-        @tool(description=tool_description)
-        def write_file(
-            file_path: str,
-            content: str,
-            runtime: ToolRuntime[None, FilesystemState],
-        ) -> Command | str:
-            file_path = _validate_path(file_path)
-            if not runtime.tool_call_id:
-                value_error_msg = "Tool call ID is required for write_file invocation"
-                raise ValueError(value_error_msg)
-            if _has_memories_prefix(file_path):
-                stripped_file_path = _strip_memories_prefix(file_path)
-                store = _get_store(runtime)
-                namespace = _get_namespace()
-                if store.get(namespace, stripped_file_path) is not None:
-                    return f"Cannot write to {file_path} because it already exists. Read and then make an edit, or write to a new path."
-                new_file_data = _create_file_data(content)
-                store.put(namespace, stripped_file_path, _convert_file_data_to_store_item(new_file_data))
-                return f"Updated longterm memories file {file_path}"
-            return _write_file_to_state(runtime.state, runtime.tool_call_id, file_path, content)
-
-    else:
-
-        @tool(description=tool_description)
-        def write_file(
-            file_path: str,
-            content: str,
-            runtime: ToolRuntime[None, FilesystemState],
-        ) -> Command | str:
-            file_path = _validate_path(file_path)
-            if not runtime.tool_call_id:
-                value_error_msg = "Tool call ID is required for write_file invocation"
-                raise ValueError(value_error_msg)
-            return _write_file_to_state(runtime.state, runtime.tool_call_id, file_path, content)
+    @tool(description=tool_description)
+    def write_file(
+        file_path: str,
+        content: str,
+        runtime: ToolRuntime[None, FilesystemState],
+    ) -> "Command | str":
+        file_path = _validate_path(file_path)
+        if not runtime.tool_call_id:
+            raise ValueError("Tool call ID is required for write_file invocation")
+        resolved_backend = _get_backend(backend, runtime)
+        result = resolved_backend.write(file_path, content)
+        if result.error:
+            return result.error
+        if result.files_update:
+            return Command(
+                update={
+                    "files": result.files_update,
+                    "messages": [ToolMessage(f"Updated file {file_path}", tool_call_id=runtime.tool_call_id)],
+                }
+            )
+        return f"Updated file {file_path}"
 
     return write_file
 
 
-def _edit_file_tool_generator(custom_description: str | None = None, *, long_term_memory: bool) -> BaseTool:
+def _edit_file_tool_generator(
+    custom_description: str | None = None,
+    *,
+    long_term_memory: bool,  # noqa: ARG001
+    backend: "BACKEND_TYPES | None" = None,
+) -> BaseTool:
     """Generate the edit_file tool.
 
     Args:
         custom_description: Optional custom description for the tool.
-        long_term_memory: Whether to enable longterm memory support.
+        long_term_memory: Unused; retained for call-site compatibility.
+        backend: Optional backend instance or factory.
 
     Returns:
-        Configured edit_file tool that performs string replacements in files.
+        Configured edit_file tool that performs string replacements via the resolved backend.
     """
-    tool_description = EDIT_FILE_TOOL_DESCRIPTION
-    if custom_description:
-        tool_description = custom_description
-    elif long_term_memory:
-        tool_description += EDIT_FILE_TOOL_DESCRIPTION_LONGTERM_SUPPLEMENT
+    tool_description = custom_description or EDIT_FILE_TOOL_DESCRIPTION
 
-    def _perform_file_edit(
-        file_data: FileData,
+    @tool(description=tool_description)
+    def edit_file(
+        file_path: str,
         old_string: str,
         new_string: str,
+        runtime: ToolRuntime[None, FilesystemState],
         *,
         replace_all: bool = False,
-    ) -> tuple[FileData, str] | str:
-        """Perform string replacement on file data.
-
-        Args:
-            file_data: The file data to edit.
-            old_string: String to find and replace.
-            new_string: Replacement string.
-            replace_all: If True, replace all occurrences.
-
-        Returns:
-            Tuple of (updated_file_data, success_message) on success,
-            or error string on failure.
-        """
-        content = _file_data_to_string(file_data)
-        occurrences = content.count(old_string)
-        if occurrences == 0:
-            return f"Error: String not found in file: '{old_string}'"
-        if occurrences > 1 and not replace_all:
-            return f"Error: String '{old_string}' appears {occurrences} times in file. Use replace_all=True to replace all instances, or provide a more specific string with surrounding context."
-        new_content = content.replace(old_string, new_string)
-        new_file_data = _update_file_data(file_data, new_content)
-        result_msg = f"Successfully replaced {occurrences} instance(s) of the string"
-        return new_file_data, result_msg
-
-    if long_term_memory:
-
-        @tool(description=tool_description)
-        def edit_file(
-            file_path: str,
-            old_string: str,
-            new_string: str,
-            runtime: ToolRuntime[None, FilesystemState],
-            *,
-            replace_all: bool = False,
-        ) -> Command | str:
-            file_path = _validate_path(file_path)
-            is_longterm_memory = _has_memories_prefix(file_path)
-
-            # Retrieve file data from appropriate storage
-            if is_longterm_memory:
-                stripped_file_path = _strip_memories_prefix(file_path)
-                store = _get_store(runtime)
-                namespace = _get_namespace()
-                item: Item | None = store.get(namespace, stripped_file_path)
-                if item is None:
-                    return f"Error: File '{file_path}' not found"
-                file_data = _convert_store_item_to_file_data(item)
-            else:
-                try:
-                    file_data = _get_file_data_from_state(runtime.state, file_path)
-                except ValueError as e:
-                    return str(e)
-
-            # Perform the edit
-            result = _perform_file_edit(file_data, old_string, new_string, replace_all=replace_all)
-            if isinstance(result, str):  # Error message
-                return result
-
-            new_file_data, result_msg = result
-            full_msg = f"{result_msg} in '{file_path}'"
-
-            # Save to appropriate storage
-            if is_longterm_memory:
-                store.put(namespace, stripped_file_path, _convert_file_data_to_store_item(new_file_data))
-                return full_msg
-
+    ) -> "Command | str":
+        file_path = _validate_path(file_path)
+        resolved_backend = _get_backend(backend, runtime)
+        result = resolved_backend.edit(file_path, old_string, new_string, replace_all=replace_all)
+        if result.error:
+            return result.error
+        full_msg = f"Successfully replaced {result.occurrences} instance(s) of the string in '{file_path}'"
+        if result.files_update:
             return Command(
                 update={
-                    "files": {file_path: new_file_data},
+                    "files": result.files_update,
                     "messages": [ToolMessage(full_msg, tool_call_id=runtime.tool_call_id)],
                 }
             )
-    else:
-
-        @tool(description=tool_description)
-        def edit_file(
-            file_path: str,
-            old_string: str,
-            new_string: str,
-            runtime: ToolRuntime[None, FilesystemState],
-            *,
-            replace_all: bool = False,
-        ) -> Command | str:
-            file_path = _validate_path(file_path)
-
-            # Retrieve file data from state
-            try:
-                file_data = _get_file_data_from_state(runtime.state, file_path)
-            except ValueError as e:
-                return str(e)
-
-            # Perform the edit
-            result = _perform_file_edit(file_data, old_string, new_string, replace_all=replace_all)
-            if isinstance(result, str):  # Error message
-                return result
-
-            new_file_data, result_msg = result
-            full_msg = f"{result_msg} in '{file_path}'"
-
-            return Command(
-                update={
-                    "files": {file_path: new_file_data},
-                    "messages": [ToolMessage(full_msg, tool_call_id=runtime.tool_call_id)],
-                }
-            )
+        return full_msg
 
     return edit_file
 
 
-TOOL_GENERATORS = {
+def _glob_tool_generator(
+    custom_description: str | None = None,
+    *,
+    long_term_memory: bool,  # noqa: ARG001
+    backend: "BACKEND_TYPES | None" = None,
+) -> BaseTool:
+    """Generate the glob tool.
+
+    Args:
+        custom_description: Optional custom description for the tool.
+        long_term_memory: Unused; retained for call-site compatibility.
+        backend: Optional backend instance or factory.
+
+    Returns:
+        Configured glob tool that finds files matching a pattern via the resolved backend.
+    """
+    tool_description = custom_description or GLOB_TOOL_DESCRIPTION
+
+    @tool(description=tool_description)
+    def glob(
+        pattern: str,
+        runtime: ToolRuntime[None, FilesystemState],
+        path: str = "/",
+    ) -> str:
+        validated_path = _validate_path(path)
+        resolved_backend = _get_backend(backend, runtime)
+        infos = resolved_backend.glob_info(pattern, validated_path)
+        paths = [fi.get("path", "") for fi in infos]
+        result = truncate_if_too_long(paths)
+        return str(result)
+
+    return glob
+
+
+def _grep_tool_generator(
+    custom_description: str | None = None,
+    *,
+    long_term_memory: bool,  # noqa: ARG001
+    backend: "BACKEND_TYPES | None" = None,
+) -> BaseTool:
+    """Generate the grep tool.
+
+    Args:
+        custom_description: Optional custom description for the tool.
+        long_term_memory: Unused; retained for call-site compatibility.
+        backend: Optional backend instance or factory.
+
+    Returns:
+        Configured grep tool that searches file contents via the resolved backend.
+    """
+    from deepagents.backends.utils import format_grep_matches
+
+    tool_description = custom_description or GREP_TOOL_DESCRIPTION
+
+    @tool(description=tool_description)
+    def grep(
+        pattern: str,
+        runtime: ToolRuntime[None, FilesystemState],
+        path: str = "/",
+        glob: str | None = None,
+        output_mode: Literal["files_with_matches", "content", "count"] = "files_with_matches",
+    ) -> str:
+        validated_path = _validate_path(path)
+        resolved_backend = _get_backend(backend, runtime)
+        raw = resolved_backend.grep_raw(pattern, validated_path, glob)
+        if isinstance(raw, str):
+            # Error or "No matches found" string from backend
+            return raw
+        if not raw:
+            return "No matches found"
+        result = format_grep_matches(raw, output_mode)
+        return truncate_if_too_long(result)  # type: ignore[return-value]
+
+    return grep
+
+
+def _execute_tool_generator(
+    custom_description: str | None = None,
+    *,
+    long_term_memory: bool,  # noqa: ARG001
+    backend: "BACKEND_TYPES | None" = None,
+) -> BaseTool:
+    """Generate the execute tool.
+
+    The generated tool always checks at runtime whether the resolved backend
+    supports execution. If it does not, it returns a friendly error message
+    rather than raising an exception.
+
+    Args:
+        custom_description: Optional custom description for the tool.
+        long_term_memory: Unused; retained for call-site compatibility.
+        backend: Optional backend instance or factory.
+
+    Returns:
+        Configured execute tool.
+    """
+    tool_description = custom_description or EXECUTE_TOOL_DESCRIPTION
+
+    @tool(description=tool_description)
+    def execute(
+        command: str,
+        runtime: ToolRuntime[None, FilesystemState],
+    ) -> str:
+        resolved_backend = _get_backend(backend, runtime)
+        if not _supports_execution(resolved_backend):
+            return (
+                "Error: Execution not available. The current backend does not support command execution. "
+                "Please configure a SandboxBackendProtocol backend to enable the execute tool."
+            )
+        response = resolved_backend.execute(command)  # type: ignore[attr-defined]
+        status = "succeeded" if response.exit_code == 0 else "failed"
+        truncated_note = " (output truncated)" if response.truncated else ""
+        return f"Command {status} with exit code {response.exit_code}{truncated_note}:\n{response.output}"
+
+    return execute
+
+
+TOOL_GENERATORS: dict[str, Any] = {
     "ls": _ls_tool_generator,
     "read_file": _read_file_tool_generator,
     "write_file": _write_file_tool_generator,
     "edit_file": _edit_file_tool_generator,
+    "glob": _glob_tool_generator,
+    "grep": _grep_tool_generator,
+    "execute": _execute_tool_generator,
 }
 
 
-def _get_filesystem_tools(custom_tool_descriptions: dict[str, str] | None = None, *, long_term_memory: bool) -> list[BaseTool]:
-    """Get filesystem tools.
+def _get_filesystem_tools(
+    custom_tool_descriptions: dict[str, str] | None = None,
+    *,
+    long_term_memory: bool,
+    backend: "BACKEND_TYPES | None" = None,
+) -> list[BaseTool]:
+    """Get all filesystem tools with the given configuration.
 
     Args:
         custom_tool_descriptions: Optional custom descriptions for tools.
-        long_term_memory: Whether to enable longterm memory support.
+        long_term_memory: Passed through to each tool generator (unused by
+            backend-aware generators but kept for API stability).
+        backend: Optional backend instance or factory propagated to each tool.
 
     Returns:
-        List of configured filesystem tools (ls, read_file, write_file, edit_file).
+        List of configured filesystem tools (ls, read_file, write_file,
+        edit_file, glob, grep, execute).
     """
     if custom_tool_descriptions is None:
         custom_tool_descriptions = {}
     tools = []
-
     for tool_name, tool_generator in TOOL_GENERATORS.items():
-        tool = tool_generator(custom_tool_descriptions.get(tool_name), long_term_memory=long_term_memory)
-        tools.append(tool)
+        generated = tool_generator(
+            custom_tool_descriptions.get(tool_name),
+            long_term_memory=long_term_memory,
+            backend=backend,
+        )
+        tools.append(generated)
     return tools
 
 
@@ -996,32 +999,52 @@ Here are the first 10 lines of the result:
 class FilesystemMiddleware(AgentMiddleware):
     """Middleware for providing filesystem and optional execution tools to an agent.
 
-    This middleware adds four filesystem tools to the agent: ls, read_file, write_file,
-    and edit_file. Files can be stored in two locations:
-    - Short-term: In the agent's state (ephemeral, lasts only for the conversation)
-    - Long-term: In a persistent store (persists across conversations when enabled)
+    This middleware adds seven tools to the agent: ls, read_file, write_file,
+    edit_file, glob, grep, and execute.
 
-    If the backend implements SandboxBackendProtocol, an execute tool is also added
-    for running shell commands.
+    All file operations are routed through a pluggable *backend*. If no
+    backend is supplied, a ``StateBackend`` is used (files stored ephemerally
+    in LangGraph state). Pass a ``BackendFactory`` (callable) or a
+    ``BackendProtocol`` instance to customise storage.
+
+    The ``execute`` tool is always registered. At runtime it checks whether
+    the resolved backend implements ``SandboxBackendProtocol``. If it does
+    not, a friendly error message is returned rather than raising an exception.
+    The execute tool is *filtered out* of the model's tool list (via
+    ``wrap_model_call``) when the backend does not support execution, so the
+    model will never try to call it.
 
     Args:
-        long_term_memory: Whether to enable longterm memory support.
-        system_prompt_extension: Optional custom system prompt override.
+        backend: Optional backend instance or callable factory
+            ``(runtime) -> BackendProtocol``. Defaults to ``StateBackend``.
+        system_prompt: Optional custom system prompt override.
         custom_tool_descriptions: Optional custom tool descriptions override.
+        tool_token_limit_before_evict: Token limit before evicting a large
+            tool result to the filesystem. ``None`` disables eviction.
 
     Raises:
-        ValueError: If longterm memory is enabled but no store is available.
+        ValueError: (at tool runtime) If longterm memory is enabled but no
+            store is available.
 
     Example:
         ```python
-        from langchain.agents.middleware.filesystem import FilesystemMiddleware
+        from deepagents.middleware.filesystem import FilesystemMiddleware
+        from deepagents.backends import StateBackend, CompositeBackend, StoreBackend
         from langchain.agents import create_agent
 
-        # Short-term memory only
-        agent = create_agent(middleware=[FilesystemMiddleware(long_term_memory=False)])
+        # Default StateBackend
+        agent = create_agent(middleware=[FilesystemMiddleware()])
 
-        # With long-term memory
-        agent = create_agent(middleware=[FilesystemMiddleware(long_term_memory=True)])
+
+        # Custom backend factory
+        def make_backend(rt):
+            return CompositeBackend(
+                default=StateBackend(rt),
+                routes={"/memories/": StoreBackend(rt)},
+            )
+
+
+        agent = create_agent(middleware=[FilesystemMiddleware(backend=make_backend)])
         ```
     """
 
@@ -1030,6 +1053,7 @@ class FilesystemMiddleware(AgentMiddleware):
     def __init__(
         self,
         *,
+        backend: "BACKEND_TYPES | None" = None,
         long_term_memory: bool = False,
         system_prompt: str | None = None,
         custom_tool_descriptions: dict[str, str] | None = None,
@@ -1038,38 +1062,57 @@ class FilesystemMiddleware(AgentMiddleware):
         """Initialize the filesystem middleware.
 
         Args:
-            long_term_memory: Whether to enable longterm memory support.
+            backend: Optional backend instance or factory. When ``None``
+                (default) a ``StateBackend`` is used at each tool call.
+                Pass a callable ``(ToolRuntime) -> BackendProtocol`` to
+                create backends lazily from each tool invocation's runtime.
+            long_term_memory: Deprecated flag kept for API compatibility.
+                Prefer supplying a composite backend with a StoreBackend route.
             system_prompt: Optional custom system prompt override.
             custom_tool_descriptions: Optional custom tool descriptions override.
-            tool_token_limit_before_evict: Optional token limit before evicting a tool result to the filesystem.
+            tool_token_limit_before_evict: Optional token limit before
+                evicting a tool result to the filesystem.
         """
+        # Normalise: if no backend supplied, produce a factory that creates StateBackend
+        if backend is None:
+            from deepagents.backends.state import StateBackend as _StateBackend
+
+            self.backend: BACKEND_TYPES = lambda rt: _StateBackend(rt)
+        else:
+            self.backend = backend
+
         self.long_term_memory = long_term_memory
         self.tool_token_limit_before_evict = tool_token_limit_before_evict
-        self.system_prompt = FILESYSTEM_SYSTEM_PROMPT
-        if system_prompt is not None:
-            self.system_prompt = system_prompt
-        elif long_term_memory:
-            self.system_prompt += FILESYSTEM_SYSTEM_PROMPT_LONGTERM_SUPPLEMENT
+        self._custom_system_prompt: str | None = system_prompt
 
-        self.tools = _get_filesystem_tools(custom_tool_descriptions, long_term_memory=long_term_memory)
+        self.tools = _get_filesystem_tools(
+            custom_tool_descriptions,
+            long_term_memory=long_term_memory,
+            backend=self.backend,
+        )
 
     def before_agent(self, state: AgentState, runtime: Runtime[Any]) -> dict[str, Any] | None:  # noqa: ARG002
-        """Validate that store is available if longterm memory is enabled.
+        """No-op pre-agent hook (retained for AgentMiddleware interface).
 
         Args:
             state: The state of the agent.
             runtime: The LangGraph runtime.
 
         Returns:
-            The unmodified model request.
-
-        Raises:
-            ValueError: If long_term_memory is True but runtime.store is None.
+            None (no state modifications).
         """
-        if self.long_term_memory and runtime.store is None:
-            msg = "Longterm memory is enabled, but no store is available"
-            raise ValueError(msg)
         return None
+
+    def _get_backend(self, runtime: Any) -> Any:
+        """Resolve the middleware's backend using the given runtime.
+
+        Args:
+            runtime: Any runtime that can be passed to the backend factory.
+
+        Returns:
+            A concrete BackendProtocol instance.
+        """
+        return _get_backend(self.backend, runtime)
 
     def wrap_model_call(
         self,
@@ -1091,8 +1134,8 @@ class FilesystemMiddleware(AgentMiddleware):
         backend_supports_execution = False
         if has_execute_tool:
             # Resolve backend to check execution support
-            backend = self._get_backend(request.runtime)
-            backend_supports_execution = _supports_execution(backend)
+            resolved = self._get_backend(request.runtime)
+            backend_supports_execution = _supports_execution(resolved)
 
             # If execute tool exists but backend doesn't support it, filter it out
             if not backend_supports_execution:
@@ -1104,13 +1147,9 @@ class FilesystemMiddleware(AgentMiddleware):
         if self._custom_system_prompt is not None:
             system_prompt = self._custom_system_prompt
         else:
-            # Build dynamic system prompt based on available tools
             prompt_parts = [FILESYSTEM_SYSTEM_PROMPT]
-
-            # Add execution instructions if execute tool is available
             if has_execute_tool and backend_supports_execution:
                 prompt_parts.append(EXECUTION_SYSTEM_PROMPT)
-
             system_prompt = "\n\n".join(prompt_parts)
 
         if system_prompt:
@@ -1132,32 +1171,24 @@ class FilesystemMiddleware(AgentMiddleware):
         Returns:
             The model response from the handler.
         """
-        # Check if execute tool is present and if backend supports it
         has_execute_tool = any((tool.name if hasattr(tool, "name") else tool.get("name")) == "execute" for tool in request.tools)
 
         backend_supports_execution = False
         if has_execute_tool:
-            # Resolve backend to check execution support
-            backend = self._get_backend(request.runtime)
-            backend_supports_execution = _supports_execution(backend)
+            resolved = self._get_backend(request.runtime)
+            backend_supports_execution = _supports_execution(resolved)
 
-            # If execute tool exists but backend doesn't support it, filter it out
             if not backend_supports_execution:
                 filtered_tools = [tool for tool in request.tools if (tool.name if hasattr(tool, "name") else tool.get("name")) != "execute"]
                 request = request.override(tools=filtered_tools)
                 has_execute_tool = False
 
-        # Use custom system prompt if provided, otherwise generate dynamically
         if self._custom_system_prompt is not None:
             system_prompt = self._custom_system_prompt
         else:
-            # Build dynamic system prompt based on available tools
             prompt_parts = [FILESYSTEM_SYSTEM_PROMPT]
-
-            # Add execution instructions if execute tool is available
             if has_execute_tool and backend_supports_execution:
                 prompt_parts.append(EXECUTION_SYSTEM_PROMPT)
-
             system_prompt = "\n\n".join(prompt_parts)
 
         if system_prompt:
@@ -1165,54 +1196,95 @@ class FilesystemMiddleware(AgentMiddleware):
 
         return await handler(request)
 
-    def _intercept_large_tool_result(self, tool_result: ToolMessage | Command) -> ToolMessage | Command:
+    def _intercept_large_tool_result(
+        self,
+        tool_result: ToolMessage | Command,
+        runtime: ToolRuntime | None = None,
+    ) -> ToolMessage | Command:
+        """Intercept large tool results and evict them to the filesystem.
+
+        When the result exceeds ``tool_token_limit_before_evict`` tokens, the
+        content is saved via the resolved backend. If the backend writes to
+        state (``files_update`` is set), a ``Command`` is returned to update
+        LangGraph state. If the backend is external (``files_update`` is
+        ``None``), a ``ToolMessage`` referencing the saved path is returned
+        instead.
+
+        Args:
+            tool_result: The tool result to potentially intercept.
+            runtime: Optional ToolRuntime used to resolve the backend for
+                routing the evicted content.
+
+        Returns:
+            The original result if small enough, or a replacement referencing
+            the saved file path.
+        """
+        from deepagents.backends.utils import sanitize_tool_call_id
+
+        def _evict(content: str, tool_call_id: str) -> tuple[str, ToolMessage, dict[str, Any] | None]:
+            """Write *content* to the backend and return (file_path, replacement_msg, files_update_or_None)."""
+            safe_id = sanitize_tool_call_id(tool_call_id)
+            file_path = f"/large_tool_results/{safe_id}"
+            file_data = _create_file_data(content)
+            files_update: dict[str, Any] | None = {file_path: file_data}
+
+            if runtime is not None:
+                resolved_backend = _get_backend(self.backend, runtime)
+                write_result = resolved_backend.write(file_path, content)
+                if write_result.error is None:
+                    # If write succeeded and backend is external (no files_update), use store path
+                    if write_result.files_update is None:
+                        files_update = None
+                    else:
+                        files_update = write_result.files_update
+
+            replacement = ToolMessage(
+                TOO_LARGE_TOOL_MSG.format(
+                    tool_call_id=tool_call_id,
+                    file_path=file_path,
+                    content_sample=_format_content_with_line_numbers(
+                        [line[:1000] for line in file_data["content"][:10]], format_style="tab", start_line=1
+                    ),
+                ),
+                tool_call_id=tool_call_id,
+            )
+            return file_path, replacement, files_update
+
+        def _is_too_large(content: str) -> bool:
+            return bool(self.tool_token_limit_before_evict and len(content) > 4 * self.tool_token_limit_before_evict)
+
         if isinstance(tool_result, ToolMessage) and isinstance(tool_result.content, str):
             content = tool_result.content
-            if self.tool_token_limit_before_evict and len(content) > 4 * self.tool_token_limit_before_evict:
-                file_path = f"/large_tool_results/{tool_result.tool_call_id}"
-                file_data = _create_file_data(content)
-                state_update = {
-                    "messages": [
-                        ToolMessage(
-                            TOO_LARGE_TOOL_MSG.format(
-                                tool_call_id=tool_result.tool_call_id,
-                                file_path=file_path,
-                                content_sample=_format_content_with_line_numbers(file_data["content"][:10], format_style="tab", start_line=1),
-                            ),
-                            tool_call_id=tool_result.tool_call_id,
-                        )
-                    ],
-                    "files": {file_path: file_data},
-                }
-                return Command(update=state_update)
+            if _is_too_large(content):
+                file_path, replacement, files_update = _evict(content, tool_result.tool_call_id)
+                if files_update is None:
+                    # External backend — no LangGraph state update needed
+                    return replacement
+                return Command(update={"messages": [replacement], "files": files_update})
+
         elif isinstance(tool_result, Command):
             update = tool_result.update
             if update is None:
                 return tool_result
             message_updates = update.get("messages", [])
-            file_updates = update.get("files", {})
+            file_updates: dict[str, Any] = dict(update.get("files", {}))
 
-            edited_message_updates = []
+            edited_messages = []
             for message in message_updates:
-                if self.tool_token_limit_before_evict and isinstance(message, ToolMessage) and isinstance(message.content, str):
-                    content = message.content
-                    if len(content) > 4 * self.tool_token_limit_before_evict:
-                        file_path = f"/large_tool_results/{message.tool_call_id}"
-                        file_data = _create_file_data(content)
-                        edited_message_updates.append(
-                            ToolMessage(
-                                TOO_LARGE_TOOL_MSG.format(
-                                    tool_call_id=message.tool_call_id,
-                                    file_path=file_path,
-                                    content_sample=_format_content_with_line_numbers(file_data["content"][:10], format_style="tab", start_line=1),
-                                ),
-                                tool_call_id=message.tool_call_id,
-                            )
-                        )
-                        file_updates[file_path] = file_data
-                        continue
-                edited_message_updates.append(message)
-            return Command(update={**update, "messages": edited_message_updates, "files": file_updates})
+                if (
+                    self.tool_token_limit_before_evict
+                    and isinstance(message, ToolMessage)
+                    and isinstance(message.content, str)
+                    and _is_too_large(message.content)
+                ):
+                    _file_path, replacement, evict_files_update = _evict(message.content, message.tool_call_id)
+                    edited_messages.append(replacement)
+                    if evict_files_update:
+                        file_updates.update(evict_files_update)
+                    continue
+                edited_messages.append(message)
+            return Command(update={**update, "messages": edited_messages, "files": file_updates})
+
         return tool_result
 
     def wrap_tool_call(
@@ -1227,32 +1299,32 @@ class FilesystemMiddleware(AgentMiddleware):
             handler: The handler function to call with the modified request.
 
         Returns:
-            The raw ToolMessage, or a pseudo tool message with the ToolResult in state.
+            The raw ToolMessage, or a replacement with the ToolResult in state/store.
         """
-        # If no token limit specified, or if it is a filesystem tool, do not evict
         if self.tool_token_limit_before_evict is None or request.tool_call["name"] in TOOL_GENERATORS:
             return handler(request)
 
         tool_result = handler(request)
-        return self._intercept_large_tool_result(tool_result)
+        runtime = getattr(request, "runtime", None)
+        return self._intercept_large_tool_result(tool_result, runtime)
 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        """(async)Check the size of the tool call result and evict to filesystem if too large.
+        """(async) Check the size of the tool call result and evict to filesystem if too large.
 
         Args:
             request: The tool call request being processed.
             handler: The handler function to call with the modified request.
 
         Returns:
-            The raw ToolMessage, or a pseudo tool message with the ToolResult in state.
+            The raw ToolMessage, or a replacement with the ToolResult in state/store.
         """
-        # If no token limit specified, or if it is a filesystem tool, do not evict
         if self.tool_token_limit_before_evict is None or request.tool_call["name"] in TOOL_GENERATORS:
             return await handler(request)
 
         tool_result = await handler(request)
-        return self._intercept_large_tool_result(tool_result)
+        runtime = getattr(request, "runtime", None)
+        return self._intercept_large_tool_result(tool_result, runtime)

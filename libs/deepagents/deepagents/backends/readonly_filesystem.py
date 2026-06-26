@@ -2,7 +2,7 @@
 
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 import wcmatch.glob as wcglob
@@ -35,6 +35,7 @@ class ReadOnlyFilesystemBackend(BackendProtocol):
         deny_git: bool = True,
         max_file_size_mb: int = 10,
     ) -> None:
+        """Initialize a read-only filesystem backend."""
         self.root_dir = Path(root_dir).resolve()
         self.allowed_prefixes = tuple(self._normalize_prefix(prefix) for prefix in allowed_prefixes)
         self.deny_git = deny_git
@@ -124,7 +125,11 @@ class ReadOnlyFilesystemBackend(BackendProtocol):
             return f"Error reading file '{original_path}': {exc}"
         return None
 
+    def _modified_at(self, path: Path) -> str:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
     def ls_info(self, path: str) -> list[FileInfo]:
+        """List direct children of a virtual directory."""
         try:
             dir_path = self._resolve_path(path)
         except (PermissionError, ValueError):
@@ -134,7 +139,7 @@ class ReadOnlyFilesystemBackend(BackendProtocol):
         results: list[FileInfo] = []
         try:
             children = sorted(dir_path.iterdir(), key=lambda child: child.name)
-        except (OSError, PermissionError):
+        except OSError:
             return []
         for child in children:
             if self._should_skip_path(child):
@@ -148,7 +153,7 @@ class ReadOnlyFilesystemBackend(BackendProtocol):
                 continue
             try:
                 stat_result = child.stat()
-                modified_at = datetime.fromtimestamp(stat_result.st_mtime).isoformat()
+                modified_at = self._modified_at(child)
             except OSError:
                 stat_result = None
                 modified_at = ""
@@ -174,6 +179,7 @@ class ReadOnlyFilesystemBackend(BackendProtocol):
         return results
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
+        """Read a virtual file with line numbers."""
         try:
             resolved_path = self._resolve_path(file_path)
         except (PermissionError, ValueError) as exc:
@@ -195,6 +201,7 @@ class ReadOnlyFilesystemBackend(BackendProtocol):
         return format_content_with_line_numbers(selected_lines, start_line=offset + 1)
 
     def grep_raw(self, pattern: str, path: str | None = None, glob: str | None = None) -> list[GrepMatch] | str:
+        """Search virtual files without invoking external processes."""
         try:
             regex = re.compile(pattern)
         except re.error as exc:
@@ -233,6 +240,7 @@ class ReadOnlyFilesystemBackend(BackendProtocol):
         return wcglob.globmatch(stripped, pattern, flags=flags) or wcglob.globmatch(Path(stripped).name, pattern, flags=flags)
 
     def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+        """Find virtual files matching a glob pattern."""
         if ".." in PurePosixPath(pattern).parts:
             return []
         normalized_pattern = pattern.lstrip("/")
@@ -254,6 +262,7 @@ class ReadOnlyFilesystemBackend(BackendProtocol):
                 if not candidate.is_file():
                     continue
                 stat_result = candidate.stat()
+                modified_at = self._modified_at(candidate)
             except OSError:
                 continue
             results.append(
@@ -261,24 +270,28 @@ class ReadOnlyFilesystemBackend(BackendProtocol):
                     "path": self._to_virtual_path(candidate),
                     "is_dir": False,
                     "size": int(stat_result.st_size),
-                    "modified_at": datetime.fromtimestamp(stat_result.st_mtime).isoformat(),
+                    "modified_at": modified_at,
                 }
             )
         results.sort(key=lambda item: item.get("path", ""))
         return results
 
     def write(self, file_path: str, content: str) -> WriteResult:
+        """Refuse file creation."""
         _ = content
         return WriteResult(error=f"ReadOnlyFilesystemBackend denies write to {file_path}")
 
     def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
+        """Refuse file edits."""
         _ = old_string, new_string, replace_all
         return EditResult(error=f"ReadOnlyFilesystemBackend denies edit to {file_path}")
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        """Refuse file uploads."""
         return [FileUploadResponse(path=path, error="permission_denied") for path, _ in files]
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Download files as a read-only operation."""
         responses: list[FileDownloadResponse] = []
         for path in paths:
             try:

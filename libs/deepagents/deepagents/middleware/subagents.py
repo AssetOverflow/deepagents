@@ -1,7 +1,7 @@
 """Middleware for providing subagents to an agent via a `task` tool."""
 
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, NotRequired, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnConfig
@@ -12,6 +12,9 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
+
+
+SubagentResultMode = Literal["trusted", "proposal_only"]
 
 
 class SubAgent(TypedDict):
@@ -201,8 +204,43 @@ When NOT to use the task tool:
 - Remember to use the `task` tool to silo independent tasks within a multi-part objective.
 - You should use the `task` tool whenever you have a complex task that will take multiple steps, and is independent from other tasks that the agent needs to complete. These agents are highly competent and efficient."""  # noqa: E501
 
+PROPOSAL_ONLY_TASK_DESCRIPTION_NOTE = """
+
+## Result mode
+This task tool is configured with `result_mode="proposal_only"`. Subagent outputs are candidate reports only. Treat them as material to reconcile, validate, summarize, or reject; do not treat them as authoritative by default."""  # noqa: E501
+
+PROPOSAL_ONLY_RESULT_PREFIX = """Subagent result mode: proposal_only
+Subagent type: {subagent_type}
+Authority: proposal_only; reconcile and validate this result before relying on it.
+
+"""
 
 DEFAULT_GENERAL_PURPOSE_DESCRIPTION = "General-purpose agent for researching complex questions, searching for files and content, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. This agent has access to all tools as the main agent."  # noqa: E501
+
+
+def _validate_result_mode(result_mode: str) -> SubagentResultMode:
+    """Validate and return a supported subagent result mode."""
+    if result_mode not in {"trusted", "proposal_only"}:
+        msg = "result_mode must be either 'trusted' or 'proposal_only'"
+        raise ValueError(msg)
+    return cast("SubagentResultMode", result_mode)
+
+
+def _format_task_description_for_result_mode(task_description: str, result_mode: SubagentResultMode) -> str:
+    """Adjust the task tool description for the configured result mode."""
+    if result_mode != "proposal_only":
+        return task_description
+    return task_description.replace(
+        "4. The agent's outputs should generally be trusted",
+        "4. The agent's outputs are proposal-only: reconcile and validate them before relying on them",
+    ) + PROPOSAL_ONLY_TASK_DESCRIPTION_NOTE
+
+
+def _format_subagent_result_content(content: Any, *, subagent_type: str, result_mode: SubagentResultMode) -> Any:
+    """Format the subagent result content according to the configured mode."""
+    if result_mode == "trusted":
+        return content
+    return PROPOSAL_ONLY_RESULT_PREFIX.format(subagent_type=subagent_type) + str(content)
 
 
 def _get_subagents(
@@ -286,6 +324,7 @@ def _create_task_tool(
     subagents: list[SubAgent | CompiledSubAgent],
     general_purpose_agent: bool,
     task_description: str | None = None,
+    result_mode: SubagentResultMode = "trusted",
 ) -> BaseTool:
     """Create a task tool for invoking subagents.
 
@@ -299,6 +338,7 @@ def _create_task_tool(
         general_purpose_agent: Whether to include general-purpose agent.
         task_description: Custom description for the task tool. If `None`,
             uses default template. Supports `{available_agents}` placeholder.
+        result_mode: How returned subagent results should be framed.
 
     Returns:
         A StructuredTool that can invoke subagents by type.
@@ -313,12 +353,17 @@ def _create_task_tool(
     )
     subagent_description_str = "\n".join(subagent_descriptions)
 
-    def _return_command_with_state_update(result: dict, tool_call_id: str) -> Command:
+    def _return_command_with_state_update(result: dict, tool_call_id: str, subagent_type: str) -> Command:
         state_update = {k: v for k, v in result.items() if k not in _EXCLUDED_STATE_KEYS}
+        final_content = _format_subagent_result_content(
+            result["messages"][-1].content,
+            subagent_type=subagent_type,
+            result_mode=result_mode,
+        )
         return Command(
             update={
                 **state_update,
-                "messages": [ToolMessage(result["messages"][-1].content, tool_call_id=tool_call_id)],
+                "messages": [ToolMessage(final_content, tool_call_id=tool_call_id)],
             }
         )
 
@@ -336,6 +381,7 @@ def _create_task_tool(
     elif "{available_agents}" in task_description:
         # If custom description has placeholder, format with agent descriptions
         task_description = task_description.format(available_agents=subagent_description_str)
+    task_description = _format_task_description_for_result_mode(task_description, result_mode)
 
     def task(
         description: str,
@@ -350,7 +396,7 @@ def _create_task_tool(
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
-        return _return_command_with_state_update(result, runtime.tool_call_id)
+        return _return_command_with_state_update(result, runtime.tool_call_id, subagent_type)
 
     async def atask(
         description: str,
@@ -365,7 +411,7 @@ def _create_task_tool(
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
-        return _return_command_with_state_update(result, runtime.tool_call_id)
+        return _return_command_with_state_update(result, runtime.tool_call_id, subagent_type)
 
     return StructuredTool.from_function(
         name="task",
@@ -405,6 +451,8 @@ class SubAgentMiddleware(AgentMiddleware):
         general_purpose_agent: Whether to include the general-purpose agent. Defaults to `True`.
         task_description: Custom description for the task tool. If `None`, uses the
             default description template.
+        result_mode: `trusted` preserves existing behavior. `proposal_only` wraps subagent results
+            with a non-authoritative proposal envelope and updates task instructions accordingly.
 
     Example:
         ```python
@@ -421,6 +469,7 @@ class SubAgentMiddleware(AgentMiddleware):
                 )
             ],
         )
+
 
         # Add custom middleware to subagents
         agent = create_agent(
@@ -447,10 +496,12 @@ class SubAgentMiddleware(AgentMiddleware):
         system_prompt: str | None = TASK_SYSTEM_PROMPT,
         general_purpose_agent: bool = True,
         task_description: str | None = None,
+        result_mode: SubagentResultMode = "trusted",
     ) -> None:
         """Initialize the SubAgentMiddleware."""
         super().__init__()
         self.system_prompt = system_prompt
+        validated_result_mode = _validate_result_mode(result_mode)
         task_tool = _create_task_tool(
             default_model=default_model,
             default_tools=default_tools or [],
@@ -459,6 +510,7 @@ class SubAgentMiddleware(AgentMiddleware):
             subagents=subagents or [],
             general_purpose_agent=general_purpose_agent,
             task_description=task_description,
+            result_mode=validated_result_mode,
         )
         self.tools = [task_tool]
 

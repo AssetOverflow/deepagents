@@ -41,7 +41,7 @@ def test_create_deep_agent_wires_explicit_store_into_create_agent(monkeypatch):
 
     monkeypatch.setattr(graph_module, "create_agent", fake_create_agent)
     monkeypatch.setattr(graph_module, "SubAgentMiddleware", DummySubAgentMiddleware)
-    monkeypatch.setattr(graph_module, "_create_core_middleware", lambda model, trigger, keep: [])
+    monkeypatch.setattr(graph_module, "_create_core_middleware", lambda model, trigger=None, keep=None, **kw: [])
 
     result = graph_module.create_deep_agent(
         model="test-model",
@@ -73,13 +73,28 @@ def test_redis_settings_raise_not_implemented_error():
         )
 
 
-def test_backend_raises_not_implemented_error():
-    with pytest.raises(NotImplementedError, match="Backend wiring"):
-        graph_module.create_deep_agent(
-            model="test-model",
-            tools=[],
-            backend=object(),  # type: ignore[arg-type]
-        )
+def test_backend_is_accepted(monkeypatch):
+    """backend parameter is now fully wired; passing it should NOT raise."""
+    class DummySubAgentMiddleware:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class DummyGraph:
+        def with_config(self, config):
+            return self
+
+    monkeypatch.setattr(graph_module, "create_agent", lambda *args, **kwargs: DummyGraph())
+    monkeypatch.setattr(graph_module, "SubAgentMiddleware", DummySubAgentMiddleware)
+    monkeypatch.setattr(graph_module, "_create_core_middleware", lambda model, trigger=None, keep=None, **kw: [])
+
+    from deepagents.backends.state import StateBackend
+
+    # Passing a backend factory should succeed without raising NotImplementedError
+    graph_module.create_deep_agent(
+        model="test-model",
+        tools=[],
+        backend=lambda rt: StateBackend(rt),
+    )
 
 
 def test_enable_redis_store_false_is_allowed(monkeypatch):
@@ -93,7 +108,7 @@ def test_enable_redis_store_false_is_allowed(monkeypatch):
 
     monkeypatch.setattr(graph_module, "create_agent", lambda *args, **kwargs: DummyGraph())
     monkeypatch.setattr(graph_module, "SubAgentMiddleware", DummySubAgentMiddleware)
-    monkeypatch.setattr(graph_module, "_create_core_middleware", lambda model, trigger, keep: [])
+    monkeypatch.setattr(graph_module, "_create_core_middleware", lambda model, trigger=None, keep=None, **kw: [])
 
     graph_module.create_deep_agent(
         model="anthropic:claude-sonnet-4-5",

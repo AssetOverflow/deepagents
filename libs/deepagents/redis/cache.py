@@ -48,7 +48,6 @@ class RedisCache(BaseCache[Any]):
                 not supply a TTL.
             serde: Serializer implementation supplied to ``BaseCache``.
         """
-
         super().__init__(serde=serde)
         self._client = client
         self._prefix = prefix.rstrip(":")
@@ -56,7 +55,6 @@ class RedisCache(BaseCache[Any]):
 
     def _format_key(self, full_key: FullKey) -> str:
         """Convert a ``FullKey`` into a namespaced Redis key."""
-
         namespace, key = full_key
         if namespace:
             namespace_segment = ":".join(namespace)
@@ -65,7 +63,6 @@ class RedisCache(BaseCache[Any]):
 
     def _deserialize(self, payload: Any) -> Any:
         """Deserialize values returned by Redis into cache payloads."""
-
         if payload is None:
             return None
         if isinstance(payload, bytes):
@@ -74,7 +71,6 @@ class RedisCache(BaseCache[Any]):
 
     def _normalize_ttl(self, ttl: int | None) -> int | None:
         """Resolve the effective TTL for an entry."""
-
         if ttl is not None:
             return ttl
         return self._default_ttl_seconds
@@ -89,7 +85,6 @@ class RedisCache(BaseCache[Any]):
             A mapping of the subset of ``keys`` that are present in Redis to
             their deserialized payloads.
         """
-
         redis_keys = [self._format_key(full_key) for full_key in keys]
         if not redis_keys:
             return {}
@@ -103,7 +98,6 @@ class RedisCache(BaseCache[Any]):
 
     async def aget(self, keys: Sequence[FullKey]) -> dict[FullKey, Any]:
         """Asynchronous counterpart to :meth:`get`."""
-
         return await asyncio.get_running_loop().run_in_executor(None, self.get, list(keys))
 
     def set(self, pairs: Mapping[FullKey, tuple[Any, int | None]]) -> None:
@@ -112,7 +106,6 @@ class RedisCache(BaseCache[Any]):
         Args:
             pairs: Mapping of full keys to ``(value, ttl_seconds)`` tuples.
         """
-
         for full_key, (value, ttl) in pairs.items():
             redis_key = self._format_key(full_key)
             payload = self.serde.dumps_typed(value)
@@ -124,12 +117,10 @@ class RedisCache(BaseCache[Any]):
 
     async def aset(self, pairs: Mapping[FullKey, tuple[Any, int | None]]) -> None:
         """Asynchronous counterpart to :meth:`set`."""
-
         await asyncio.get_running_loop().run_in_executor(None, self.set, dict(pairs))
 
     def _iter_namespace_keys(self, namespace: Namespace | None) -> list[str]:
         """Enumerate Redis keys matching a namespace filter."""
-
         pattern = f"{self._prefix}:*"
         if namespace is not None:
             if namespace:
@@ -140,7 +131,6 @@ class RedisCache(BaseCache[Any]):
 
     def _decode_key(self, key: Any) -> str:
         """Normalize Redis key representations to ``str``."""
-
         if isinstance(key, bytes):
             return key.decode("utf-8")
         return str(key)
@@ -152,7 +142,6 @@ class RedisCache(BaseCache[Any]):
             namespaces: Optional collection of namespace filters to clear.  When
                 omitted, the entire cache namespace (``self._prefix``) is purged.
         """
-
         if namespaces is None:
             keys = self._iter_namespace_keys(None)
         else:
@@ -164,5 +153,4 @@ class RedisCache(BaseCache[Any]):
 
     async def aclear(self, namespaces: Sequence[Namespace] | None = None) -> None:
         """Asynchronous counterpart to :meth:`clear`."""
-
         await asyncio.get_running_loop().run_in_executor(None, self.clear, namespaces)

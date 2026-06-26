@@ -9,10 +9,7 @@ is not needed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:  # pragma: no cover - optional dependency for type checkers
-    import redis
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -53,7 +50,6 @@ class RedisSettings:
         Returns:
             Keyword arguments compatible with :meth:`redis.Redis.from_url`.
         """
-
         kwargs: dict[str, Any] = {
             "decode_responses": self.decode_responses,
             "retry_on_timeout": self.retry_on_timeout,
@@ -83,7 +79,6 @@ def create_redis_client(settings: RedisSettings) -> Any:
         ValueError: If no connection URL is supplied when a client is not
             pre-instantiated.
     """
-
     if settings.client is not None:
         return settings.client
     if settings.url is None:
@@ -92,10 +87,7 @@ def create_redis_client(settings: RedisSettings) -> Any:
     try:
         import redis  # type: ignore[import-not-found]
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised in integration
-        msg = (
-            "The 'redis' package is required to create a Redis client. "
-            "Install it or provide an instantiated client via RedisSettings.client."
-        )
+        msg = "The 'redis' package is required to create a Redis client. Install it or provide an instantiated client via RedisSettings.client."
         raise ModuleNotFoundError(msg) from exc
     kwargs = settings.connection_kwargs()
     return redis.Redis.from_url(settings.url, **kwargs)

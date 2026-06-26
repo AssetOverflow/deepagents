@@ -46,26 +46,37 @@ def get_default_model() -> ChatAnthropic:
 
 def _create_core_middleware(
     model: str | BaseChatModel,
-    trigger: tuple[str, float | int],
-    keep: tuple[str, float | int],
+    trigger: tuple[str, float | int] | None = None,
+    keep: tuple[str, float | int] | None = None,
+    *,
+    backend: "BackendProtocol | BackendFactory | None" = None,
 ) -> list[AgentMiddleware]:
     """Create the reusable middleware shared by the main agent and subagents.
 
     Args:
         model: The language model to use for summarization.
         trigger: Tuple of (mode, threshold) for when to trigger summarization.
-            Mode is either "fraction" or "tokens".
+            Mode is either "fraction" or "tokens". Defaults to the proactive
+            token-based threshold.
         keep: Tuple of (mode, count) for how many messages to keep.
-            Mode is either "fraction" or "messages".
+            Mode is either "fraction" or "messages". Defaults to the standard
+            message-count setting.
+        backend: Optional backend instance or factory for FilesystemMiddleware.
 
     Returns:
-        A list of configured core middleware instances.
+        A list of configured core middleware instances in order:
+        [TodoListMiddleware, FilesystemMiddleware, SummarizationMiddleware,
+        AnthropicPromptCachingMiddleware, PatchToolCallsMiddleware]
     """
+    resolved_trigger: tuple[str, float | int] = trigger or ("tokens", PROACTIVE_SUMMARY_THRESHOLD)
+    resolved_keep: tuple[str, float | int] = keep or ("messages", DEFAULT_CONTEXT_MESSAGES_TO_KEEP)
     return [
+        TodoListMiddleware(),
+        FilesystemMiddleware(backend=backend),
         SummarizationMiddleware(
             model=model,
-            trigger=trigger,  # type: ignore[arg-type]
-            keep=keep,  # type: ignore[arg-type]
+            trigger=resolved_trigger,  # type: ignore[arg-type]
+            keep=resolved_keep,  # type: ignore[arg-type]
             trim_tokens_to_summarize=None,
         ),
         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
@@ -87,26 +98,17 @@ def _resolve_store(store: BaseStore | None, use_longterm_memory: bool) -> BaseSt
 
 def _reject_unwired_options(
     *,
-    backend: BackendProtocol | BackendFactory | None,
     redis_settings: Any | str | None,
     enable_redis_cache: bool,
     enable_redis_store: bool | None,
     redis_cache_default_ttl_seconds: int | None,
 ) -> None:
-    """Fail closed for options whose runtime adapters are not wired."""
-    if backend is not None:
-        msg = (
-            "Backend wiring is not available in this package build because "
-            "FilesystemMiddleware does not accept a backend parameter yet."
-        )
-        raise NotImplementedError(msg)
+    """Fail closed for options whose runtime adapters are not wired.
 
-    if (
-        redis_settings is not None
-        or enable_redis_cache
-        or enable_redis_store is True
-        or redis_cache_default_ttl_seconds is not None
-    ):
+    The ``backend`` parameter is now fully wired (FilesystemMiddleware accepts
+    it), so it is intentionally omitted from this guard.
+    """
+    if redis_settings is not None or enable_redis_cache or enable_redis_store is True or redis_cache_default_ttl_seconds is not None:
         msg = (
             "Redis-backed cache/store construction is not available in this package build. "
             "Pass an explicit cache/store, or wire Redis adapters before enabling Redis options."
@@ -177,7 +179,6 @@ def create_deep_agent(
         A configured deep agent.
     """
     _reject_unwired_options(
-        backend=backend,
         redis_settings=redis_settings,
         enable_redis_cache=enable_redis_cache,
         enable_redis_store=enable_redis_store,
@@ -201,17 +202,14 @@ def create_deep_agent(
         trigger = ("tokens", PROACTIVE_SUMMARY_THRESHOLD)
         keep = ("messages", DEFAULT_CONTEXT_MESSAGES_TO_KEEP)
 
-    core_middleware_stack = _create_core_middleware(model, trigger, keep)
+    core_middleware_stack = _create_core_middleware(model, trigger, keep, backend=backend)
 
     subagent_middleware_stack: list[AgentMiddleware] = [
-        TodoListMiddleware(),
-        FilesystemMiddleware(),
-        *core_middleware_stack,
+        *_create_core_middleware(model, trigger, keep, backend=backend),
     ]
 
     deepagent_middleware: list[AgentMiddleware] = [
-        TodoListMiddleware(),
-        FilesystemMiddleware(),
+        *core_middleware_stack,
         SubAgentMiddleware(
             default_model=model,
             default_tools=tools,
@@ -220,7 +218,6 @@ def create_deep_agent(
             default_interrupt_on=interrupt_on,
             general_purpose_agent=True,
         ),
-        *core_middleware_stack,
     ]
     if interrupt_on is not None:
         deepagent_middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))
